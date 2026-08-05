@@ -1,2 +1,6 @@
 /venv/
 /.idea/
+/MAE/
+/1_sweeps/
+/__pycache__/
+/results/

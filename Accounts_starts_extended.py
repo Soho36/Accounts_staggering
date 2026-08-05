@@ -10,7 +10,7 @@ pd.set_option('display.min_rows', 1000)  # Show min 1000 rows when printing
 pd.set_option('display.max_rows', 2000)  # Show max 100 rows when printing
 pd.set_option('display.max_columns', 10)  # Show max 50 columns when printing
 
-CSV_PATH = "../MAE/databento_premarket_picks.csv"  # path to your CSV file
+CSV_PATH = "MAE/databento_premarket_picks.csv"  # path to your CSV file
 START_CAPITAL = 1500
 
 # --- Drawdown settings ---
