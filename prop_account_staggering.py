@@ -5,10 +5,8 @@ models each account independently, applies a supplied per-trade commission,
 and checks the drawdown rule at the trade's MAE (not only at end of day).
 
 Example:
-    python prop_account_staggering.py --start-policy time --interval-days 30 \
-        --commission-per-trade 0.75
-    python prop_account_staggering.py --start-policy any --interval-days 14 \
-        --profit-trigger 1000 --dd-trigger 400
+    python prop_account_staggering.py --start-policy time --interval-days 30 --commission-per-trade 1.05
+    python prop_account_staggering.py --start-policy any --interval-days 14 --profit-trigger 1000 --dd-trigger 400
 """
 
 from __future__ import annotations
