@@ -1,0 +1,16 @@
+policy,withdraw,ruin_rate,wipeout_rate,wipeouts,blowups,spent,cash_p10,cash_median,cash_p90,equity_median,net_p10,net_median,seats_median,starts_median
+subscription,never,n/a,0%,0.0,5,4800,0,0,0,71083,36734,66283,24,18
+"bootstrap · all-in, strip to net","strip to $2,600",17%,50%,1.22,20,0,105,110698,212350,37371,0,149225,40,1
+"bootstrap · 1/interval, strip to net","strip to $2,600",0%,33%,0.67,10,0,6222,35080,100914,15730,9502,47434,21,8
+"bootstrap · 1/interval, keep $4,000","strip to $4,000",0%,11%,0.11,4,0,1063,18142,56349,16342,9439,45306,18,9
+"bootstrap · 1/interval, never withdraw",never,0%,0%,0.0,0,0,0,0,0,38282,7641,38282,6,5
+"bootstrap · 1/interval, $200 per $400 (50%)",$200 per $400 gained,0%,0%,0.0,7,0,1840,22000,60520,35985,6243,69610,21,15
+"bootstrap · 1/interval, $200 per $600 (33%)",$200 per $600 gained,0%,0%,0.0,6,0,540,12900,38360,43176,6648,67376,20,15
+"bootstrap · 1/interval, $200 per $1,000 (20%)","$200 per $1,000 gained",0%,0%,0.0,5,0,0,5600,19220,52789,7528,58693,18,12
+"bootstrap · 1/interval, $200 per $2,000 (10%)","$200 per $2,000 gained",0%,0%,0.0,3,0,0,1200,5980,52654,8137,54754,14,9
+"bootstrap · 1/interval, $500 per $2,500 (20%)","$500 per $2,500 gained",0%,0%,0.0,3,0,0,3200,13470,47626,7269,53076,16,11
+"bootstrap · 1/interval, $1,000 per $5,000 (20%)","$1,000 per $5,000 gained",0%,0%,0.0,3,0,0,2700,10120,42674,8481,46331,12,7
+"bootstrap · 1/interval, $1,000 per $2,000 (50%)","$1,000 per $2,000 gained",0%,0%,0.0,3,0,540,15400,41020,40128,8126,65976,17,12
+"bootstrap · 1/interval, $2,000 per $4,000 (50%)","$2,000 per $4,000 gained",0%,0%,0.0,3,0,0,9500,31380,35857,8481,49413,13,8
+"bootstrap · 1/interval, $200 per $1,000 + 2-seat reserve","$200 per $1,000 gained",0%,11%,0.11,4,0,400,4600,14160,47093,1238,54293,15,9
+"bootstrap · 1/interval, $200 per $1,000 + 5-seat reserve","$200 per $1,000 gained",0%,28%,0.28,1,0,1000,2200,6220,18820,1000,22220,8,5

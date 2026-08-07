@@ -119,8 +119,12 @@ class Harvest:
         if self.mode == "none":
             return "never"
         if self.mode == "level":
-            return f"to ${self.keep:,.0f}"
-        return f"{self.chunk / self.step:.0%} of gains"
+            return f"strip to ${self.keep:,.0f}"
+        return f"${self.chunk:,.0f} per ${self.step:,.0f} gained"
+
+    @property
+    def rate(self) -> float:
+        return self.chunk / self.step if self.mode == "ratchet" else 0.0
 
 
 @dataclass
@@ -414,18 +418,6 @@ def run_account(net, mae, mfe, i0, h: Harvest, rule: Rule):
     return a
 
 
-def trace_account(ex, net, mae, mfe, i0, h: Harvest, rule: Rule):
-    """Full path of one seat: equity, the moving floor, and cash taken out."""
-    a = new_account(i0, rule)
-    path = []
-    for i in range(i0, len(net)):
-        step(a, net[i], mae[i], mfe[i], h, rule)
-        path.append((pd.Timestamp(ex[i]), a["eq"] + a["banked"], a["eq"], a["floor"]))
-        if not a["alive"]:
-            break
-    return path
-
-
 # ------------------------------------------------------------------ book ----
 def should_start(live, day, last_start, cfg: BookCfg) -> bool:
     """Start triggers, carried over from the staggering simulator."""
@@ -555,6 +547,18 @@ _TPL = r"""<!DOCTYPE html>
  .warn{background:#fef3c7;border-left:3px solid #d97706;padding:10px 14px;border-radius:6px;font-size:12.8px;margin-bottom:16px}
  .warn b{color:#92400e}
  .onepath{background:#eef2ff;border-left:3px solid #4f46e5;padding:8px 12px;border-radius:6px;font-size:12.3px;color:#3730a3;margin:6px 0}
+ .pickwrap{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:2px 0 10px}
+ .picklabel{font-size:11.5px;color:#6b7280;text-transform:uppercase;letter-spacing:.03em}
+ .picks{display:flex;flex-wrap:wrap;gap:6px}
+ .pick{font:inherit;font-size:12.2px;padding:4px 10px;border:1px solid #d3d8de;
+  background:#fff;border-radius:999px;cursor:pointer;color:#374151}
+ .pick:hover{border-color:#9aa3ad;background:#f8fafc}
+ .pick.on{background:#1f2937;border-color:#1f2937;color:#fff}
+ .pick .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px}
+ .pstat{display:flex;flex-wrap:wrap;gap:0 22px;font-size:12.4px;color:#374151;
+  background:#f8fafc;border:1px solid #eef0f3;border-radius:8px;padding:8px 12px;margin-bottom:10px}
+ .pstat b{color:#111;font-weight:600}
+ .pstat .bad{color:#b91c1c}.pstat .ok{color:#15803d}
 </style></head><body>
 <header><h1>Prop-account farming &mdash; buy seats, harvest the survivors</h1>
 <p>RR strategy, every window, RR __RRV__, $__DDV__ trailing drawdown, $__COSTV__ per seat,
@@ -566,19 +570,13 @@ signals and differs only by start date. N seats is N contracts, and a drawdown d
 enough to kill one is deep enough to kill the book. The totals below scale with seat
 count; the per-seat figures are what actually measure the strategy.</div>
 
-<h2>1 &middot; How a seat lives and dies</h2>
-<div class="panel"><div id="c_life" style="height:400px"></div>
- <div class="note">The floor chases the peak upward until peak profit reaches the Safety
- Net, then freezes at $__FLOORV__ forever. Everything after that point is cushion. Withdrawing
- cash lowers equity toward that frozen floor &mdash; which is why harvesting kills seats.</div></div>
-
-<h2>2 &middot; Does a seat reach the Safety Net? By start date</h2>
+<h2>1 &middot; Does a seat reach the Safety Net? By start date</h2>
 <div class="panel"><div id="c_starts" style="height:380px"></div>
  <div class="note">Green = reached the Safety Net, plotted at the number of days it took.
  Red = died first. The red clusters are what matters: seats started near each other share
  one fate, so staggering spreads entry points, not outcomes.</div></div>
 
-<h2>3 &middot; Closed vs floating drawdown</h2>
+<h2>2 &middot; Closed vs floating drawdown</h2>
 <div class="panel"><div id="c_ddeq" style="height:300px"></div>
  <div id="c_dd" style="height:340px"></div>
  <div class="note">The account rule watches <i>unrealized</i> equity, so the floating line
@@ -596,7 +594,7 @@ until they both freeze and get stripped to the same number, and from then on the
 twins. The withdrawal policy is what synchronises a book. Both fixes are below: buy one
 seat at a time, and withdraw a share of gains instead of stripping to a level.</div>
 
-<h2>4 &middot; Mode 1 &mdash; subscription: own money, one seat per interval, hold forever</h2>
+<h2>3 &middot; Mode 1 &mdash; subscription: own money, one seat per interval, hold forever</h2>
 <div class="panel"><div id="c_sub" style="height:400px"></div>
  <div class="note">A new seat every __IVLV__ days paid for out of pocket, no withdrawals
  ever. Equity across all live seats on the left axis, seats held on the right. This mode
@@ -612,22 +610,32 @@ seat at a time, and withdraw a share of gains instead of stripping to a level.</
  <div class="onepath">One illustrative path, not an expectation. Section 6 has the
  distribution across every window.</div></div>
 
-<h2>5 &middot; Mode 2 &mdash; bootstrap: the seats pay for their own replacements</h2>
-<div class="panel"><div id="c_boot" style="height:400px"></div>
- <div class="note">Seats live (filled) against cumulative cash withdrawn, under
- <b>__BESTV__</b>. Every step down in seat count is a liquidation.</div></div>
+<h2>4 &middot; Mode 2 &mdash; bootstrap: the seats pay for their own replacements</h2>
+<div class="panel">
+ <div class="pickwrap"><span class="picklabel">withdrawal policy</span>
+  <div class="picks" id="picks"></div></div>
+ <div id="p_stat" class="pstat"></div>
+ <div id="c_boot" style="height:380px"></div>
+ <div class="note">Seats live (filled) against cumulative cash withdrawn. Every step down
+ in seat count is a liquidation. Switch policies above &mdash; the axes rescale, so compare
+ the shapes and read the numbers off the strip rather than eyeballing heights.</div></div>
 <div class="panel"><div id="c_boot_seats" style="height:420px"></div>
- <div class="note">__DUPV__ Each distinct purchase date is drawn once; hover for how many
- seats it stands for. Under a ratchet the lines stay spread out, because no seat is ever
- reset to a common level.</div>
- <div class="onepath">One illustrative path, not an expectation.</div></div>
+ <div class="note">Each distinct purchase date is drawn once; hover for how many seats it
+ stands for. These lines are equity <i>plus</i> cash already withdrawn, so they do not
+ overlap even when the seats behind them are identical &mdash; the synchronisation is in
+ equity alone, which is the only thing the liquidation floor is measured against. What you
+ can see is the consequence: switch to a level policy and the lines all turn together and
+ stop together, and the seat count above drops to zero in one step. Switch to a ratchet and
+ the deaths spread out.</div>
+ <div class="onepath">One illustrative path per policy, not an expectation. Section 5 has
+ the distribution across every window.</div></div>
 <div class="panel"><div id="c_year" style="height:320px"></div>
- <div class="note">Cash per calendar year from that same book. The spread between best and
- worst year is the risk this design carries, and it is not smoothed by holding more seats,
- because the seats are not independent.</div>
+ <div class="note">Cash per calendar year from the selected policy. The spread between best
+ and worst year is the risk this design carries, and it is not smoothed by holding more
+ seats, because the seats are not independent.</div>
  <div class="onepath">One illustrative path, not an expectation.</div></div>
 
-<h2>6 &middot; Both modes, across every window</h2>
+<h2>5 &middot; Both modes, across every window</h2>
 <div class="panel"><div id="c_keep" style="height:560px"></div>
  <div class="note">Median realized cash across every __NWIN__ overlapping __HZV__-year
  window; whiskers are p10 to p90. Read the whisker, not the bar &mdash; the spread is wider
@@ -639,6 +647,29 @@ seat at a time, and withdraw a share of gains instead of stripping to a level.</
  The subscription line is what you would have if you never took a cent out; the bootstrap
  line is mostly money already banked.</div>
  <div class="onepath">One illustrative path each, not an expectation.</div></div>
+
+<h2>6 &middot; Which policy? &mdash; the decision</h2>
+<div class="panel"><div id="c_front" style="height:480px"></div>
+ <div class="note"><b>How to read this.</b> Up is a better typical outcome; right is a
+ better bad case. A policy with another policy above <i>and</i> to the right of it is
+ <b>dominated</b> &mdash; strictly worse on both counts, so there is no preference under
+ which you would pick it. Those are drawn hollow. The line joins what is left: the
+ frontier, where buying more typical outcome costs you downside. Green outlines never lost
+ the whole book in any window; red outlines did.</div>
+ <div class="note">Both axes are <b>net</b> = cash withdrawn + equity still live &minus;
+ own capital spent, over a __HZV__-year window. Net is the only measure the two funding
+ modes can share, but it mixes banked cash with equity that can still be lost &mdash; the
+ <i>banked</i> share in the hover is how much of it you would actually be holding.</div></div>
+<div class="panel" style="overflow:auto" id="t_pick"></div>
+<div class="note">Same numbers, sorted by what you might care about. Pick the row whose
+constraint is really yours, not the biggest number: these are medians of __NWIN__
+overlapping windows on one strategy over one 6.5-year sample, so differences smaller than
+the p10&ndash;p90 spread are not differences at all.</div>
+<div class="warn"><b>What this cannot tell you.</b> The withdrawal rate is fitted to this
+sample &mdash; nothing here is out-of-sample. The windows overlap heavily, so 18 of them is
+more like 3&ndash;4 independent periods. And every policy shares one strategy on one
+instrument: the frontier says which withdrawal rule was best <i>given</i> that the strategy
+kept working, not what happens if it stops.</div>
 
 <h2>7 &middot; Monthly P&amp;L</h2>
 <div class="panel"><div id="c_mstrat" style="height:360px"></div>
@@ -681,21 +712,6 @@ const BG={plot_bgcolor:'#fff',paper_bgcolor:'#fff'};
 document.getElementById('cards').innerHTML=D.cards.map(c=>
  `<div class="card"><div class="t">${c[0]}</div><div class="v ${c[2]||''}">${c[1]}</div>
   <div class="s">${c[3]||''}</div></div>`).join('');
-Plotly.newPlot('c_life',[
- {x:D.life.x,y:D.life.eq,type:'scatter',mode:'lines',name:'equity in the account',
-  line:{width:1.8,color:'#111'}},
- {x:D.life.x,y:D.life.fl,type:'scatter',mode:'lines',name:'liquidation floor',
-  line:{width:1.6,color:'#e15759',shape:'hv'}},
- {x:D.life.x,y:D.life.tot,type:'scatter',mode:'lines',name:'equity + cash taken out',
-  line:{width:1.4,color:'#4e79a7',dash:'dot'}}],
- Object.assign({margin:{l:66,r:14,t:28,b:34},font:F,hovermode:'x unified',
-  title:{text:'One seat, from purchase to liquidation',x:0,font:{size:13}},
-  shapes:[{type:'line',xref:'paper',x0:0,x1:1,y0:D.safety,y1:D.safety,
-   line:{color:'#15803d',width:1.2,dash:'dash'}}],
-  annotations:[{xref:'paper',x:0.01,y:D.safety,text:'Safety Net - floor freezes here',
-   showarrow:false,yshift:10,font:{size:11,color:'#15803d'}}],
-  xaxis:{type:'date',gridcolor:'#eef0f3'},yaxis:{title:'$',gridcolor:'#eef0f3'},
-  legend:{orientation:'h',y:-.14}},BG),CFG);
 // One colour for every seat, on purpose: the point of these charts is the shared
 // shape, and a rotating palette invites you to track individual lines instead.
 function seatchart(id,curves,title){
@@ -713,8 +729,6 @@ function seatchart(id,curves,title){
    yaxis:{title:'$ per seat',gridcolor:'#eef0f3'}},BG),CFG);}
 seatchart('c_sub_seats',D.sub.curves,
  'Subscription - every seat, P&L including cash withdrawn (never)');
-seatchart('c_boot_seats',D.boot.curves,
- 'Bootstrap - every purchase date, P&L including cash already withdrawn');
 Plotly.newPlot('c_sub',[
  {x:D.sub.x,y:D.sub.equity,type:'scatter',mode:'lines',name:'portfolio equity',
   fill:'tozeroy',line:{width:1.8,color:'#15803d'},fillcolor:'rgba(21,128,61,.14)'},
@@ -795,23 +809,65 @@ Plotly.newPlot('c_keep',[{
    x:0,font:{size:13}},
   xaxis:{title:'cash withdrawn $',gridcolor:'#eef0f3'},
   yaxis:{automargin:true,autorange:'reversed'}},BG),CFG);
-Plotly.newPlot('c_boot',[
- {x:D.boot.x,y:D.boot.live,type:'scatter',mode:'lines',name:'seats live',
-  fill:'tozeroy',line:{width:1,color:'#4e79a7',shape:'hv'},
-  fillcolor:'rgba(78,121,167,.22)'},
- {x:D.boot.x,y:D.boot.cash,type:'scatter',mode:'lines',name:'cash withdrawn',
-  yaxis:'y2',line:{width:2,color:'#15803d'}}],
- Object.assign({margin:{l:60,r:66,t:28,b:34},font:F,hovermode:'x unified',
-  title:{text:'Seats live and cash taken out - '+D.boot.name,x:0,font:{size:13}},
-  xaxis:{type:'date',gridcolor:'#eef0f3'},
-  yaxis:{title:'seats',gridcolor:'#eef0f3',rangemode:'tozero'},
-  yaxis2:{title:'cash $',overlaying:'y',side:'right',showgrid:false},
-  legend:{orientation:'h',y:-.16}},BG),CFG);
-Plotly.newPlot('c_year',[{x:D.year.x,y:D.year.y,type:'bar',
- marker:{color:'#4e79a7'},hovertemplate:'%{x}<br>$%{y:,.0f}<extra></extra>'}],
- Object.assign({margin:{l:70,r:14,t:28,b:34},font:F,
-  title:{text:'Cash withdrawn per year',x:0,font:{size:13}},
-  yaxis:{gridcolor:'#eef0f3'}},BG),CFG);
+// ---- policy switcher: one full-period run is stored per policy -------------
+const money=v=>(v<0?'-$':'$')+Math.abs(Math.round(v)).toLocaleString();
+function drawPolicy(i){
+ const b=D.books[i];
+ [...document.querySelectorAll('.pick')].forEach((el,j)=>
+  el.classList.toggle('on',j===i));
+ Plotly.react('c_boot',[
+  {x:b.x,y:b.live,type:'scatter',mode:'lines',name:'seats live',
+   fill:'tozeroy',line:{width:1,color:'#4e79a7',shape:'hv'},
+   fillcolor:'rgba(78,121,167,.22)'},
+  {x:b.x,y:b.cash,type:'scatter',mode:'lines',name:'cash withdrawn',
+   yaxis:'y2',line:{width:2,color:'#15803d'}},
+  {x:b.x,y:b.equity,type:'scatter',mode:'lines',name:'equity in live seats',
+   yaxis:'y2',line:{width:1.4,color:'#b07aa1',dash:'dot'}}],
+  Object.assign({margin:{l:60,r:70,t:28,b:34},font:F,hovermode:'x unified',
+   title:{text:'Seats live, cash out and equity - '+b.name,x:0,font:{size:13}},
+   xaxis:{type:'date',gridcolor:'#eef0f3'},
+   yaxis:{title:'seats',gridcolor:'#eef0f3',rangemode:'tozero'},
+   yaxis2:{title:'$',overlaying:'y',side:'right',showgrid:false},
+   legend:{orientation:'h',y:-.16}},BG),CFG);
+ seatchart('c_boot_seats',b.curves,
+  'Every purchase date - P&L including cash already withdrawn - '+b.name);
+ Plotly.react('c_year',[{x:b.year_x,y:b.year_y,type:'bar',
+  marker:{color:b.year_y.map(v=>v>=0?'#4e79a7':'#e15759')},
+  hovertemplate:'%{x}<br>$%{y:,.0f}<extra></extra>'}],
+  Object.assign({margin:{l:70,r:14,t:28,b:34},font:F,
+   title:{text:'Cash withdrawn per year - '+b.name,x:0,font:{size:13}},
+   xaxis:{type:'category'},yaxis:{gridcolor:'#eef0f3'}},BG),CFG);
+ document.getElementById('p_stat').innerHTML=
+  `<span>seats bought <b>${b.bought}</b> on <b>${b.starts}</b> dates</span>`+
+  `<span>blowups <b>${b.deaths}</b></span>`+
+  `<span>full wipeouts <b class="${b.wipeouts?'bad':'ok'}">${b.wipeouts}</b></span>`+
+  `<span>alive at end <b>${b.live_end}</b></span>`+
+  `<span>withdrawn <b>${money(b.withdrawn)}</b></span>`+
+  `<span>cash in hand <b class="ok">${money(b.final_cash)}</b></span>`+
+  `<span>equity left <b>${money(b.final_equity)}</b></span>`+
+  `<span>net <b>${money(b.net)}</b></span>`;}
+document.getElementById('picks').innerHTML=D.books.map((b,i)=>
+ `<button class="pick" onclick="drawPolicy(${i})"><span class="dot" style="background:${
+  b.colour}"></span>${b.name}</button>`).join('');
+drawPolicy(D.book_default);
+// ---- the frontier: typical outcome against bad case ------------------------
+Plotly.newPlot('c_front',[
+ {x:D.front.fx,y:D.front.fy,type:'scatter',mode:'lines',name:'frontier',
+  line:{width:1.4,color:'#9aa3ad',dash:'dot'},hoverinfo:'skip'},
+ {x:D.front.x,y:D.front.y,type:'scatter',mode:'markers+text',name:'policy',
+  text:D.front.tag,textposition:'middle right',
+  textfont:{size:10.5,color:'#374151'},
+  cliponaxis:false,
+  marker:{size:D.front.size,symbol:D.front.symbol,
+   color:D.front.fill,line:{width:2,color:D.front.edge}},
+  customdata:D.front.info,showlegend:false,
+  hovertemplate:'<b>%{customdata[0]}</b><br>%{customdata[1]}<extra></extra>'}],
+ Object.assign({margin:{l:80,r:150,t:30,b:52},font:F,
+  title:{text:'Typical outcome against bad case - hollow markers are dominated',
+   x:0,font:{size:13}},
+  xaxis:{title:'net at p10, the bad case  $',gridcolor:'#eef0f3',zeroline:true,
+   zerolinecolor:'#9ca3af'},
+  yaxis:{title:'net at the median  $',gridcolor:'#eef0f3'}},BG),CFG);
 function bars(id,m,title,ylab){
  Plotly.newPlot(id,[{x:m.x,y:m.y,type:'bar',
   marker:{color:m.y.map(v=>v>=0?'#59a14f':'#e15759'),
@@ -840,6 +896,8 @@ tbl('t_keep',D.robust,['policy','withdraw','ruin_rate','wipeout_rate','wipeouts'
  ['policy','withdraws','ruin rate','windows with a wipeout','wipeouts (mean)',
   'blowups (median)','cash p10 $','cash MEDIAN $','cash p90 $',
   'equity left (median) $','net p10 $','net MEDIAN $','seats bought (median)']);
+tbl('t_pick',D.pick,['want','policy','why'],
+ ['if what you care about is...','then take','the numbers behind it']);
 tbl('t_rec',D.rec,['metric','sim','mt5'],['metric','this simulation','MT5 run']);
 document.getElementById('foot').textContent=
  `code ${D.git} · generated ${D.gen} · measured on 2020-2026. RR and the window set are `+
@@ -873,10 +931,7 @@ def build_html(payload):
             .replace("__COSTV__", f"{payload['cost']:,.0f}")
             .replace("__COMMV__", f"{COMMISSION_ROUNDTURN:.2f}")
             .replace("__IVLV__", str(payload["interval_days"]))
-            .replace("__FLOORV__", f"{payload['frozen_floor']:,.0f}")
             .replace("__PATHV__", payload["path_label"])
-            .replace("__DUPV__", payload["dup_note"])
-            .replace("__BESTV__", payload["best_label"])
             .replace("__NWIN__", str(payload["n_windows"]))
             .replace("__HZV__", f"{payload['horizon']:g}")
             .replace("__DATA__", json.dumps(payload, separators=(",", ":"),
@@ -1056,19 +1111,31 @@ def main():
          Harvest("level", keep=4000.0)),
         ("bootstrap · 1/interval, never withdraw", boot(), Harvest("none")),
     ]
+    # One seat's price per N of gains: the smallest withdrawal that can actually
+    # buy something, swept across rates.
     for st_ in (400.0, 600.0, 1000.0, 2000.0):
-        POLICIES.append((f"bootstrap · 1/interval, {chunk / st_:.0%} of gains",
+        POLICIES.append((f"bootstrap · 1/interval, ${chunk:,.0f} per ${st_:,.0f} "
+                         f"({chunk / st_:.0%})",
                          boot(), Harvest("ratchet", chunk=chunk, step=st_)))
+    # The same idea in plain money terms, with bigger withdrawals taken less
+    # often. Rate alone does not determine behaviour: a seat on $1,000/$5,000
+    # holds its gains far longer between payouts than one on $200/$1,000, even
+    # though both take 20% in the end.
+    for ck, st_ in ((500.0, 2500.0), (1000.0, 5000.0),
+                    (1000.0, 2000.0), (2000.0, 4000.0)):
+        POLICIES.append((f"bootstrap · 1/interval, ${ck:,.0f} per ${st_:,.0f} "
+                         f"({ck / st_:.0%})",
+                         boot(), Harvest("ratchet", chunk=ck, step=st_)))
     for rsv in (2, 5):
-        POLICIES.append((f"bootstrap · 1/interval, {chunk / 1000:.0%} + {rsv}-seat "
-                         f"reserve", boot(reserve=rsv * rule.cost),
+        POLICIES.append((f"bootstrap · 1/interval, ${chunk:,.0f} per $1,000 + "
+                         f"{rsv}-seat reserve", boot(reserve=rsv * rule.cost),
                          Harvest("ratchet", chunk=chunk, step=1000.0)))
     # Whatever the CLI actually asked for, if it is not already in the menu.
     if (a.max_per_event != 1 or a.reserve or a.withdraw_step != 1000.0
             or a.withdraw_chunk):
         POLICIES.append((
-            f"bootstrap · custom: {a.max_per_event}/event, "
-            f"{chunk / a.withdraw_step:.0%} of gains"
+            f"bootstrap · custom: {a.max_per_event}/event, ${chunk:,.0f} per "
+            f"${a.withdraw_step:,.0f}"
             + (f", ${a.reserve:,.0f} reserve" if a.reserve else ""),
             boot(max_per_event=a.max_per_event, reserve=a.reserve),
             Harvest("ratchet", chunk=chunk, step=a.withdraw_step)))
@@ -1151,10 +1218,10 @@ def main():
 
     sub_bk = full_run("subscription")
     bk = full_run(safest["policy"])
-    bs = bk["series"].groupby(bk["series"]["day"].dt.date).last().reset_index(drop=True)
-    ycum = (bk["series"].assign(y=bk["series"]["day"].dt.year)
-            .groupby("y")["withdrawn"].last())
-    bkyr = (ycum.diff().fillna(ycum.iloc[0]) * a.split).round()
+    # Every bootstrap policy also gets a full-period run so the report can switch
+    # between them. This is the expensive part of the script.
+    boot_runs = {label: (bk if label == safest["policy"] else full_run(label))
+                 for label, c, _ in POLICIES if c.funding == "cash"}
 
     def seat_table(b):
         return pd.DataFrame([{
@@ -1188,42 +1255,49 @@ def main():
               f"cash withdrawn ${b['withdrawn']:>9,.0f}   "
               f"equity left ${b['equity']:>9,.0f}   net ${b['wealth']:>9,.0f}")
 
-    rep = FULL[FULL["frozen"]].iloc[
-        (FULL[FULL["frozen"]]["days_to_freeze"] - med).abs().argsort().iloc[0]]
-    path = thin(trace_account(ex, net, mae, mfe, int(rep["start_i"]), HARD, rule), 1500)
-
     # Seats bought on the same trade are not merely similar, they are identical:
     # same rule, same stream, same withdrawal level, so the paths coincide to the
     # cent. Drawing all of them stacks opaque duplicates on one curve and makes
     # the book look more diversified than it is. Draw each distinct start once
     # and carry the multiplicity in the hover instead.
-    def book_payload(b):
+    # Fifteen books, each with a line per purchase date, is most of the page
+    # weight. Day resolution and whole dollars are plenty at this zoom, and only
+    # the two featured books need the net-position series.
+    def book_payload(b, name="", full=False):
         s = b["series"]
-        ds = s.groupby(s["day"].dt.date).last().reset_index(drop=True)
+        ds = thin(s.groupby(s["day"].dt.date).last().reset_index(drop=True), 700)
+        ycum = s.assign(y=s["day"].dt.year).groupby("y")["withdrawn"].last()
+        yr = (ycum.diff().fillna(ycum.iloc[0]) * a.split).round()
         groups: dict[int, list] = {}
         for seat in b["seats"]:
             groups.setdefault(seat["i0"], []).append(seat)
         curves = []
         for i0 in sorted(groups):
             g = groups[i0]
-            pts = thin(g[0]["path"], 260)
+            pts = thin(g[0]["path"], 150)
             curves.append({"x": [p[0].strftime("%Y-%m-%d") for p in pts],
                            "y": [round(p[1]) for p in pts],
                            "n": len(g),
                            "d": g[0]["start"].strftime("%Y-%m-%d")})
-        return {
+        out = {
+            "name": name,
             "x": [str(d) for d in ds["day"]],
             "live": [int(v) for v in ds["live"]],
             "cash": [round(float(v)) for v in ds["withdrawn"]],
             "equity": [round(float(v)) for v in ds["equity"]],
-            "wealth": [round(float(v)) for v in ds["wealth"]],
-            "spent": [round(float(v)) for v in ds["spent"]],
+            "year_x": [str(i) for i in yr.index],
+            "year_y": [float(v) for v in yr],
             "curves": curves,
             "bought": b["bought"], "starts": b["starts"],
             "deaths": b["deaths"], "wipeouts": b["wipeouts"], "live_end": b["live"],
             "final_cash": round(b["cash"]), "final_equity": round(b["equity"]),
+            "withdrawn": round(b["withdrawn"]),
             "spent_total": round(b["spent"]), "net": round(b["wealth"]),
         }
+        if full:
+            out["wealth"] = [round(float(v)) for v in ds["wealth"]]
+            out["spent"] = [round(float(v)) for v in ds["spent"]]
+        return out
 
     DDP = dd_paths(ex, net, mae, mfe)
     DDd = DDP.groupby(DDP["day"].dt.date).agg(
@@ -1247,22 +1321,85 @@ def main():
     print(f"  strategy (one slot)  {bar_payload(m_strat)['note']}")
     print(f"  book (illustrative)  {bar_payload(m_book)['note']}")
 
-    sub_pl = book_payload(sub_bk)
-    boot_pl = book_payload(bk)
-    boot_pl["name"] = safest["policy"].replace("bootstrap · ", "")
+    short = lambda s: s.replace("bootstrap · ", "")
+    sub_pl = book_payload(sub_bk, "subscription", full=True)
+    boot_pl = book_payload(bk, short(safest["policy"]), full=True)
 
     def bar_colour(r):
         if r["policy"] == "subscription":
             return "#6b7280"
         return "#59a14f" if r["wipeout_rate"] == "0%" else "#e15759"
 
+    RBi = RB.set_index("policy")
+    books, default_i = [], 0
+    for label, b in boot_runs.items():
+        if label == safest["policy"]:
+            default_i = len(books)
+        pl = book_payload(b, short(label))
+        pl["colour"] = bar_colour(RBi.loc[label].to_dict() | {"policy": label})
+        books.append(pl)
+
+    # A policy is dominated when another beats it on BOTH the typical outcome and
+    # the bad case. Those can be dropped without knowing anyone's risk appetite,
+    # which is the only part of this choice the data can settle on its own.
+    pts = RB[["policy", "net_median", "net_p10"]].to_dict("records")
+    for p in pts:
+        p["dominated"] = any(
+            q["net_median"] >= p["net_median"] and q["net_p10"] >= p["net_p10"]
+            and (q["net_median"] > p["net_median"] or q["net_p10"] > p["net_p10"])
+            for q in pts)
+    dom = {p["policy"]: p["dominated"] for p in pts}
+    front = sorted((p for p in pts if not p["dominated"]), key=lambda p: p["net_p10"])
+
+    R = RB.set_index("policy")
+
+    def info(label):
+        r = R.loc[label]
+        return [short(label),
+                f"net median {r['net_median']:,.0f} · net p10 {r['net_p10']:,.0f}<br>"
+                f"banked {r['cash_median']:,.0f} · equity {r['equity_median']:,.0f}<br>"
+                f"wipeouts in {r['wipeout_rate']} of windows · "
+                f"{r['blowups']} blowups<br>"
+                + ("DOMINATED - another policy beats it on both"
+                   if dom[label] else "on the frontier")]
+
+    # The chooser: each row is a constraint someone might actually have, and the
+    # best policy under it. No row is "the answer" - which constraint is yours is
+    # not something this data can tell you.
+    def pick(mask, key, want, why_col, fmt):
+        sel = RB[mask]
+        if not len(sel):
+            return None
+        r = sel.loc[sel[key].idxmax()]
+        return {"want": want, "policy": short(r["policy"]),
+                "why": fmt.format(**r), "_p": r["policy"]}
+
+    clean = RB["wipeout_rate"] == "0%"
+    is_boot = RB["policy"] != "subscription"
+    PICKS = [p for p in (
+        pick(clean & is_boot, "net_median",
+             "never losing the whole book, best overall",
+             None, "net ${net_median:,.0f} median · ${cash_median:,.0f} of it banked "
+                   "· p10 ${net_p10:,.0f} · {blowups} blowups"),
+        pick(clean & is_boot, "cash_median",
+             "cash in hand rather than equity at risk",
+             None, "${cash_median:,.0f} banked · net ${net_median:,.0f} · "
+                   "p10 ${net_p10:,.0f}"),
+        pick(is_boot, "net_p10", "the best bad case, whatever the upside",
+             None, "p10 ${net_p10:,.0f} · net ${net_median:,.0f} median · "
+                   "wipeouts in {wipeout_rate} of windows"),
+        pick(is_boot, "net_median", "the highest typical outcome, accepting wipeouts",
+             None, "net ${net_median:,.0f} median but p10 ${net_p10:,.0f} · "
+                   "wipeouts in {wipeout_rate} of windows · ruin {ruin_rate}"),
+        pick(~is_boot, "net_median", "not touching withdrawn money at all (mode 1)",
+             None, "net ${net_median:,.0f} median, all unrealized · "
+                   "${spent:,.0f} of own capital · {blowups} blowups"),
+    ) if p]
+
     build_html({
         "rr": a.rr, "dd_limit": rule.dd, "cost": rule.cost,
         "frozen_floor": rule.frozen_floor, "safety": rule.safety_net,
         "interval_days": cfg.interval_days, "path_label": a.intratrade_path,
-        "dup_note": (f"{boot_pl['bought']} seats were bought on "
-                     f"{boot_pl['starts']} distinct dates."),
-        "best_label": boot_pl["name"],
         "horizon": a.horizon, "n_windows": len(q_starts),
         "cards": [
             ["reaches Safety Net", f"{FULL['frozen'].mean():.0%}", "ok",
@@ -1283,12 +1420,31 @@ def main():
              f"{safest['blowups']} blowups"],
             ["seat cap", str(cfg.seats), "", "firm rule, not a maths question"],
         ],
-        "life": {"x": [str(p[0]) for p in path],
-                 "tot": [round(p[1], 1) for p in path],
-                 "eq": [round(p[2], 1) for p in path],
-                 "fl": [round(p[3], 1) for p in path]},
         "sub": sub_pl,
         "boot": boot_pl,
+        "books": books,
+        "book_default": default_i,
+        "front": {
+            "x": [int(r["net_p10"]) for r in RB.to_dict("records")],
+            "y": [int(r["net_median"]) for r in RB.to_dict("records")],
+            # Only the frontier gets a printed label; the dominated cluster in the
+            # middle is unreadable with fifteen captions on top of each other, and
+            # those are the points you are meant to be ignoring anyway.
+            "tag": ["" if dom[r["policy"]] else
+                    short(r["policy"]).replace("1/interval, ", "")
+                    for r in RB.to_dict("records")],
+            "fill": ["rgba(0,0,0,0)" if dom[r["policy"]] else bar_colour(r)
+                     for r in RB.to_dict("records")],
+            "edge": [bar_colour(r) for r in RB.to_dict("records")],
+            "size": [11 if not dom[r["policy"]] else 9
+                     for r in RB.to_dict("records")],
+            "symbol": ["square" if r["policy"] == "subscription" else "circle"
+                       for r in RB.to_dict("records")],
+            "info": [info(r["policy"]) for r in RB.to_dict("records")],
+            "fx": [int(p["net_p10"]) for p in front],
+            "fy": [int(p["net_median"]) for p in front],
+        },
+        "pick": PICKS,
         "starts": {"okx": [str(d) for d in okS["start"]],
                    "oky": [int(v) for v in okS["days_to_freeze"]],
                    "badx": [str(d) for d in badS["start"]],
@@ -1312,8 +1468,6 @@ def main():
                     f"${r['equity_median']:,.0f}" for r in RB.to_dict("records")],
         },
         "robust": RB.to_dict("records"),
-        "year": {"x": [str(i) for i in bkyr.index],
-                 "y": [float(v) for v in bkyr]},
         "mstrat": bar_payload(m_strat),
         "mbook": bar_payload(m_book),
         "rec": [

@@ -124,17 +124,27 @@ That is visible in the numbers. Buying one seat at a time is *not* sufficient on
 | all-in, strip to net | **50%** | 20 | $110,698 | $149,225 |
 | 1/interval, strip to net | **33%** | 10 | $35,080 | $47,434 |
 | 1/interval, keep $4,000 | 11% | 4 | $18,142 | $45,306 |
-| 1/interval, **50% of gains** | **0%** | 7 | $22,000 | **$69,610** |
-| 1/interval, 33% of gains | **0%** | 6 | $12,900 | $67,376 |
-| 1/interval, 20% of gains | **0%** | 5 | $5,600 | $58,693 |
-| 1/interval, 10% of gains | **0%** | 3 | $1,200 | $54,754 |
+| 1/interval, **$200 per $400** (50%) | **0%** | 7 | $22,000 | **$69,610** |
+| 1/interval, $200 per $600 (33%) | **0%** | 6 | $12,900 | $67,376 |
+| 1/interval, $200 per $1,000 (20%) | **0%** | 5 | $5,600 | $58,693 |
+| 1/interval, $200 per $2,000 (10%) | **0%** | 3 | $1,200 | $54,754 |
+| 1/interval, $1,000 per $2,000 (50%) | **0%** | 3 | $15,400 | $65,976 |
+| 1/interval, $500 per $2,500 (20%) | **0%** | 3 | $3,200 | $53,076 |
+| 1/interval, $1,000 per $5,000 (20%) | **0%** | 3 | $2,700 | $46,331 |
 | subscription (mode 1) | 0% | 5 | $0 | $66,283 |
 
 **The ratchet is the fix.** Withdrawing a *share of gains* rather than stripping to a
 level took the wipeout rate to zero at every rate tested, because no seat is ever reset
-to a common equity and the book keeps its dispersion. Withdrawing 50% of gains also beats
-strip-to-net on **net** ($69,610 vs $47,434) despite banking less cash, because far more
-equity survives.
+to a common equity and the book keeps its dispersion. Withdrawing $200 per $400 gained
+also beats strip-to-net on **net** ($69,610 vs $47,434) despite banking less cash,
+because far more equity survives.
+
+**Chunk size matters on its own, not just the rate.** At an identical 20%, taking $200
+per $1,000 nets $58,693 while taking $1,000 per $5,000 nets $46,331 — bigger, rarer
+withdrawals leave the seat further above the Safety Net for longer, which cuts blowups
+(3 vs 5 per window) but also starves seat purchases. That is why the policies are
+specified in money terms rather than as a percentage: two policies with the same rate are
+not the same policy.
 
 **The cash reserve backfired.** Holding back 2 seats' worth of cash pushed the wipeout
 rate from 0% to 11%; 5 seats' worth pushed it to 28%. A reserve buys fewer seats without
@@ -146,7 +156,7 @@ in the sweep as a negative result.
 
 One path each, not an expectation.
 
-| | Mode 1 subscription | Mode 2 ratchet at 50% |
+| | Mode 1 subscription | Mode 2, $200 per $400 |
 |---|---|---|
 | own capital in | $5,000 | $1,200 seed |
 | seats bought | 25, on 25 distinct dates | 35, on 35 distinct dates |
@@ -232,11 +242,27 @@ Written into `results/`:
 - `farming_book_seats.csv` — per-seat summary of the illustrative bootstrap book
 - `farming_subscription_seats.csv` — the same for the subscription book
 
-The HTML report has nine sections: how one seat lives and dies; whether a seat reaches
-the Safety Net by start date; closed vs floating drawdown; mode 1 with its portfolio
-curve and per-seat curves; mode 2 with the same; both modes across every window plus a
-net-position comparison; monthly P&L for the strategy and the book; the full policy
-table; and a reconstruction check against a real MT5 run.
+The HTML report has nine sections: whether a seat reaches the Safety Net by start date;
+closed vs floating drawdown; mode 1 with its portfolio curve and per-seat curves; mode 2
+with a **policy switcher** that redraws the book, the seat curves and the yearly cash for
+any policy in the sweep; both modes across every window plus a net-position comparison;
+**the decision section**; monthly P&L; the full policy table; and a reconstruction check
+against a real MT5 run.
+
+### The decision section
+
+This is the part that answers "which one do I pick". It plots every policy as typical
+outcome (net median) against bad case (net p10). A policy with another one above **and**
+to the right of it is **dominated** — strictly worse on both counts, so no risk appetite
+would ever choose it. Those are drawn hollow and unlabelled; what remains is the frontier,
+where more typical outcome costs you downside. Marker outlines are green if the policy
+never lost the whole book in any window, red if it did.
+
+Underneath is a table of "if what you care about is X, then take Y", computed from the
+sweep rather than asserted — one row per constraint someone might actually have (never
+losing the book; cash in hand; best worst case; highest typical outcome; not touching
+withdrawn money at all). None of the rows is *the* answer: which constraint is yours is
+the one thing the data cannot settle.
 
 Three of those came from `Accounts_starts_extended(LEGACY).py` — the individual curves,
 the monthly P&L bars with their win-rate box, and the closed-vs-floating drawdown panels
