@@ -106,6 +106,13 @@ then only replaces deaths.
 **Mode 2 — bootstrap.** The seats pay for their own replacements out of withdrawn cash.
 This is the one that can die permanently.
 
+There is exactly one pot of cash. It starts at `--seed`. A frozen seat pays money *into*
+it when the withdrawal rule fires; buying a seat takes `--cost` *out* of it. Nothing else
+adds to it. So **withdrawals are the only thing that funds growth** — which is why
+"never withdraw" under bootstrap funding is not a strategy but a dead end: at $1,200 seed
+and $200 a seat it buys exactly **6 seats**, one per interval, and then the pot is empty
+permanently. That is the whole explanation for the 6 in the table below.
+
 ### Why a book dies all at once, and what actually fixes it
 
 Two seats bought on the same trade are not merely correlated, they are **identical** —
@@ -131,6 +138,8 @@ That is visible in the numbers. Buying one seat at a time is *not* sufficient on
 | 1/interval, $1,000 per $2,000 (50%) | **0%** | 3 | $15,400 | $65,976 |
 | 1/interval, $500 per $2,500 (20%) | **0%** | 3 | $3,200 | $53,076 |
 | 1/interval, $1,000 per $5,000 (20%) | **0%** | 3 | $2,700 | $46,331 |
+| 1/interval, $400 per $400 (100%) | 17% | 10 | $32,100 | $45,645 |
+| 1/interval, never withdraw | 0% | 0 | $0 | $38,282 |
 | subscription (mode 1) | 0% | 5 | $0 | $66,283 |
 
 **The ratchet is the fix.** Withdrawing a *share of gains* rather than stripping to a
@@ -146,11 +155,15 @@ withdrawals leave the seat further above the Safety Net for longer, which cuts b
 specified in money terms rather than as a percentage: two policies with the same rate are
 not the same policy.
 
-**The cash reserve backfired.** Holding back 2 seats' worth of cash pushed the wipeout
-rate from 0% to 11%; 5 seats' worth pushed it to 28%. A reserve buys fewer seats without
-making them any less correlated, and a smaller book is easier to lose entirely — you need
-8 deaths instead of 20. This was a suggested condition that the data rejected; it is kept
-in the sweep as a negative result.
+**Withdrawing 100% of the trigger amount always wipes out.** Every rule on the diagonal
+where the withdrawal equals the gain that triggers it ($400 per $400, $1,000 per $1,000,
+…) lost the whole book in 11–17% of windows. Nothing below the diagonal did. That is the
+same mechanism as strip-to-a-level: taking the entire gain puts every frozen seat back on
+the Safety Net each time, which re-synchronises the book.
+
+*(A cash-reserve condition was tested and rejected — it raised the wipeout rate rather
+than lowering it, because it buys fewer seats without making them less correlated. It has
+been removed from the code.)*
 
 ### Mode 1 vs Mode 2 over the full period
 
@@ -226,9 +239,9 @@ The book:
 - `--min-days-between-starts N` — floor on start spacing
 - `--max-per-event N` — seats bought at one time. **1 is the staggering fix**; higher
   stacks identical seats that then die together
-- `--reserve N` — cash held back before any purchase. Made things worse; see above
 - `--withdraw-chunk N` / `--withdraw-step N` — the ratchet. One chunk withdrawn per
   `step` of lifetime gain, so `chunk/step` is the withdrawal rate (200/1000 = 20%)
+- `--no-explore` — skip `bootstrap_explorer.html`, which is most of the run time
 - `--split N` — trader's share of profit (real plans are 0.8–0.9)
 - `--horizon N` — years per book window in the robustness sweep
 
@@ -237,6 +250,7 @@ The book:
 Written into `results/`:
 
 - `account_farming.html` — the full report (see below)
+- `bootstrap_explorer.html` — a page dedicated to mode 2 alone (see below)
 - `farming_starts.csv` — one row per possible seat start date
 - `farming_withdrawal_policies.csv` — the robustness sweep, both modes
 - `farming_book_seats.csv` — per-seat summary of the illustrative bootstrap book
@@ -263,6 +277,23 @@ sweep rather than asserted — one row per constraint someone might actually hav
 losing the book; cash in hand; best worst case; highest typical outcome; not touching
 withdrawn money at all). None of the rows is *the* answer: which constraint is yours is
 the one thing the data cannot settle.
+
+## The bootstrap explorer
+
+`results/bootstrap_explorer.html` is a separate page for mode 2 on its own, because that
+is where the decisions are. It opens with the money-flow explanation above, then gives two
+dropdowns — **withdraw $X** and **per $Y of lifetime gain** — over a 6 × 7 grid of
+amounts (32 valid combinations; the rest withdraw more than the gain that triggers them,
+which just duplicates the diagonal).
+
+Picking a combination redraws the book, the per-seat curves and the yearly cash for a full
+6.5-year run of that exact rule, with a stat strip of its medians across all 18 windows.
+Below is a heatmap of the whole grid with a metric switcher — net, cash, wipeout rate,
+blowups, seats bought — and every cell and table row is clickable to load it above. A
+warning banner appears automatically for any rule that ever lost the whole book, and for
+any rule that banks nothing and therefore stalls at 6 seats.
+
+It costs about 2 minutes of the run time. Skip it with `--no-explore`.
 
 Three of those came from `Accounts_starts_extended(LEGACY).py` — the individual curves,
 the monthly P&L bars with their win-rate box, and the closed-vs-floating drawdown panels

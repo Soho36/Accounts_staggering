@@ -143,7 +143,6 @@ class BookCfg:
     # old "buy everything affordable" behaviour is max_per_event = seats.
     max_per_event: int = 1
     funding: str = "cash"           # cash = bootstrap | external = subscription
-    reserve: float = 0.0            # cash held back before any purchase
 
 
 # ---------------------------------------------------------------- input ----
@@ -458,8 +457,11 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
             if cfg.funding == "external":
                 n_buy = min(cfg.max_per_event, room)
             else:
-                affordable = int(max(0.0, cash - cfg.reserve) // rule.cost)
-                n_buy = min(cfg.max_per_event, room, affordable)
+                # Bootstrap: seats are bought only out of `cash`, and the only
+                # thing that ever adds to `cash` is a withdrawal from a live
+                # seat. A policy that never withdraws therefore buys exactly
+                # seed/cost seats and then stops for good.
+                n_buy = min(cfg.max_per_event, room, int(cash // rule.cost))
             for _ in range(max(0, n_buy)):
                 a = new_account(i, rule)
                 a["start"] = day
@@ -946,6 +948,269 @@ def thin(seq, n=1200):
     return seq[::max(1, len(seq) // n)]
 
 
+# ------------------------------------------------------- bootstrap explorer ----
+_EXP_TPL = r"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Bootstrap explorer</title>
+<script>__PLOTLYJS__</script>
+<style>
+ body{font:14px/1.45 system-ui,Segoe UI,Arial;margin:0;background:#f4f5f7;color:#1a1a1a}
+ header{background:#1f2937;color:#fff;padding:14px 22px}h1{font-size:17px;margin:0}
+ header p{margin:4px 0 0;font-size:12.5px;color:#cbd5e1}
+ main{max-width:1240px;margin:16px auto;padding:0 16px}
+ .panel{background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+ .note{font-size:12.3px;color:#6b7280;margin:6px 0}
+ h2{font-size:15px;margin:20px 0 8px}
+ table{border-collapse:collapse;width:100%;font-size:12.4px}
+ th{text-align:right;padding:5px 8px;background:#f1f5f9;white-space:nowrap;cursor:pointer}
+ th:first-child,td:first-child{text-align:left}
+ td{padding:4px 8px;text-align:right;border-top:1px solid #eef0f3;white-space:nowrap}
+ tr.sel td{background:#fef9c3}
+ .flow{background:#eef2ff;border-left:3px solid #4f46e5;padding:12px 16px;border-radius:8px;font-size:13px;color:#312e81;margin-bottom:16px}
+ .flow b{color:#1e1b4b}
+ .flow code{background:#e0e7ff;padding:1px 5px;border-radius:4px;font-size:12.4px}
+ .warn{background:#fef3c7;border-left:3px solid #d97706;padding:10px 14px;border-radius:6px;font-size:12.8px;margin-bottom:16px}
+ .warn b{color:#92400e}
+ .ctl{background:#fff;border-radius:10px;padding:14px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ .ctl label{font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.03em}
+ select{font:inherit;font-size:14px;padding:6px 10px;border:1px solid #d3d8de;border-radius:7px;background:#fff;color:#111}
+ .rate{font-size:13px;color:#374151;background:#f1f5f9;padding:6px 12px;border-radius:999px}
+ .rate b{font-size:15px}
+ .pstat{display:flex;flex-wrap:wrap;gap:0 22px;font-size:12.6px;color:#374151;
+  background:#f8fafc;border:1px solid #eef0f3;border-radius:8px;padding:10px 14px;margin-bottom:14px}
+ .pstat b{color:#111;font-weight:600}
+ .pstat .bad{color:#b91c1c}.pstat .ok{color:#15803d}
+ .mb{font:inherit;font-size:12.2px;padding:4px 12px;border:1px solid #d3d8de;background:#fff;
+  border-radius:999px;cursor:pointer;color:#374151;margin-right:6px}
+ .mb.on{background:#1f2937;border-color:#1f2937;color:#fff}
+</style></head><body>
+<header><h1>Bootstrap explorer &mdash; the seats pay for their own replacements</h1>
+<p>RR __RRV__, $__DDV__ trailing drawdown, Safety Net $__SNV__, $__COSTV__ per seat,
+$__SEEDV__ starting cash, one seat at a time every __IVLV__ days, seat cap __SEATSV__.</p>
+</header><main>
+
+<div class="flow"><b>How the money actually moves.</b> There is exactly one pot of cash.
+It starts at <code>$__SEEDV__</code>. A seat that has passed the Safety Net pays money
+<i>into</i> that pot when the withdrawal rule fires; buying a seat takes
+<code>$__COSTV__</code> <i>out</i> of it. Nothing else adds to it &mdash; no outside money
+ever comes in. So <b>withdrawals are the only thing that funds growth</b>, and the two
+dropdowns below are the entire growth engine.
+<br><br>That is also why a never-withdraw rule is not a strategy here but a dead end: with
+<code>$__SEEDV__</code> of seed at <code>$__COSTV__</code> a seat it buys exactly
+<b>__NEVERV__ seats</b>, one per interval, and then the pot is empty forever and it can
+never buy another. Any policy on this page that banks nothing behaves the same way.</div>
+
+<div class="ctl">
+ <label for="sel_ck">withdraw</label>
+ <select id="sel_ck"></select>
+ <label for="sel_st">per</label>
+ <select id="sel_st"></select>
+ <label>of lifetime gain</label>
+ <span class="rate" id="rate"></span>
+</div>
+<div id="stat" class="pstat"></div>
+<div class="warn" id="alert" style="display:none"></div>
+
+<div class="panel"><div id="c_book" style="height:390px"></div>
+ <div class="note">The pot and the book together: seats held (filled, left axis) against
+ cumulative cash withdrawn and equity sitting in live seats (right axis). Every step down
+ in the filled area is a liquidation; every step up is a purchase, which is only possible
+ because the green line moved first.</div></div>
+
+<div class="panel"><div id="c_seats" style="height:420px"></div>
+ <div class="note">One line per purchase date, equity plus cash that seat has already paid
+ out. Seats bought on the same trade are identical, so each distinct date is drawn once
+ &mdash; hover for how many seats it stands for.</div></div>
+
+<div class="panel"><div id="c_year" style="height:300px"></div>
+ <div class="note">Cash withdrawn per calendar year under this rule.</div></div>
+
+<h2>The whole grid</h2>
+<div class="panel">
+ <div style="margin-bottom:10px" id="mbtns"></div>
+ <div id="c_heat" style="height:440px"></div>
+ <div class="note">Every combination scored across __NWIN__ overlapping __HZV__-year
+ windows. Click any cell to load it above. Blank cells are combinations where the
+ withdrawal is larger than the gain that triggers it, which is the same as withdrawing the
+ whole gain &mdash; they duplicate the diagonal and are left out.</div>
+ <div class="note"><b>Read the wipeout panel before the money panels.</b> Cash and net both
+ rise with how aggressively you withdraw, and so does the chance of losing the whole book;
+ a cell that looks best on net may be one you would never actually run.</div></div>
+
+<div class="panel" style="overflow:auto" id="t_grid"></div>
+<div class="note" id="foot"></div>
+</main><script>
+const D=__DATA__,CFG={displaylogo:false,responsive:true};
+const F={family:'system-ui,Segoe UI,Arial',size:11.5};
+const BG={plot_bgcolor:'#fff',paper_bgcolor:'#fff'};
+const BASE=D.base,DAY=864e5;
+const money=v=>(v<0?'-$':'$')+Math.abs(Math.round(v)).toLocaleString();
+const key=(c,s)=>c+'_'+s;
+let metric='net';
+const METRICS={
+ net:['net, median $','#eef7f0','#15803d'],
+ cash:['cash withdrawn, median $','#eef3f9','#2b6cb0'],
+ wipe:['windows that lost the whole book %','#fdf1f1','#b91c1c'],
+ blow:['seats liquidated, median','#fdf5ec','#c2760c'],
+ seats:['seats bought, median','#f4f1f8','#6b46c1']};
+
+function sel(){return key(+document.getElementById('sel_ck').value,
+                          +document.getElementById('sel_st').value);}
+function draw(){
+ const k=sel(),c=D.cells[k];
+ const ck=+document.getElementById('sel_ck').value;
+ const st=+document.getElementById('sel_st').value;
+ document.getElementById('rate').innerHTML=c?
+  `effective rate <b>${(100*ck/st).toFixed(0)}%</b> of every dollar gained`:
+  '<b>not simulated</b>';
+ if(!c){document.getElementById('stat').innerHTML=
+   '<span>This combination withdraws more than the gain that triggers it, '+
+   'so it behaves identically to the equal-amount case on the diagonal.</span>';
+  document.getElementById('alert').style.display='none';return;}
+ const b=c.book;
+ const x=o=>o.map(v=>BASE+v*DAY);
+ Plotly.react('c_book',[
+  {x:x(b.o),y:b.live,type:'scatter',mode:'lines',name:'seats held',
+   fill:'tozeroy',line:{width:1,color:'#4e79a7',shape:'hv'},
+   fillcolor:'rgba(78,121,167,.22)'},
+  {x:x(b.o),y:b.cash,type:'scatter',mode:'lines',name:'cash withdrawn (cumulative)',
+   yaxis:'y2',line:{width:2,color:'#15803d'}},
+  {x:x(b.o),y:b.eq,type:'scatter',mode:'lines',name:'equity in live seats',
+   yaxis:'y2',line:{width:1.4,color:'#b07aa1',dash:'dot'}}],
+  Object.assign({margin:{l:56,r:70,t:28,b:34},font:F,hovermode:'x unified',
+   title:{text:`$${ck.toLocaleString()} per $${st.toLocaleString()} gained`,
+    x:0,font:{size:13}},
+   xaxis:{type:'date',gridcolor:'#eef0f3'},
+   yaxis:{title:'seats',gridcolor:'#eef0f3',rangemode:'tozero'},
+   yaxis2:{title:'$',overlaying:'y',side:'right',showgrid:false},
+   legend:{orientation:'h',y:-.16}},BG),CFG);
+ Plotly.react('c_seats',b.curves.map(s=>({
+  x:x(s.o),y:s.y,type:'scatter',mode:'lines',showlegend:false,
+  line:{width:1.2,color:'#4e79a7'},opacity:.55,
+  hovertemplate:'bought '+s.d+(s.n>1?' &times;'+s.n+' seats':'')+
+   '<br>%{x|%Y-%m-%d}<br>$%{y:,.0f} each<extra></extra>'})),
+  Object.assign({margin:{l:66,r:14,t:28,b:34},font:F,
+   title:{text:'Every purchase date - P&L including cash already withdrawn',
+    x:0,font:{size:13}},
+   shapes:[{type:'line',xref:'paper',x0:0,x1:1,y0:D.safety,y1:D.safety,
+     line:{color:'#15803d',width:1,dash:'dash'}},
+    {type:'line',xref:'paper',x0:0,x1:1,y0:0,y1:0,line:{color:'#9ca3af',width:1}}],
+   xaxis:{type:'date',gridcolor:'#eef0f3'},
+   yaxis:{title:'$ per seat',gridcolor:'#eef0f3'}},BG),CFG);
+ Plotly.react('c_year',[{x:b.yx,y:b.yy,type:'bar',
+  marker:{color:b.yy.map(v=>v>=0?'#4e79a7':'#e15759')},
+  hovertemplate:'%{x}<br>$%{y:,.0f}<extra></extra>'}],
+  Object.assign({margin:{l:70,r:14,t:28,b:34},font:F,
+   title:{text:'Cash withdrawn per year',x:0,font:{size:13}},
+   xaxis:{type:'category'},yaxis:{gridcolor:'#eef0f3'}},BG),CFG);
+ document.getElementById('stat').innerHTML=
+  `<span>across ${D.nwin} windows &mdash; net median <b>${money(c.net_median)}</b></span>`+
+  `<span>cash <b>${money(c.cash_median)}</b></span>`+
+  `<span>equity left <b>${money(c.equity_median)}</b></span>`+
+  `<span>net p10 <b>${money(c.net_p10)}</b></span>`+
+  `<span>lost the whole book in <b class="${c.wipeout_pct?'bad':'ok'}">`+
+   `${c.wipeout_pct}%</b> of windows</span>`+
+  `<span>blowups <b>${c.blowups}</b></span>`+
+  `<span>seats <b>${c.seats_median}</b></span>`;
+ const al=document.getElementById('alert');
+ if(c.wipeout_pct>0){al.style.display='';al.innerHTML=
+   `<b>This rule lost every seat it held in ${c.wipeout_pct}% of windows.</b> `+
+   `It survives on this page only because withdrawn cash could rebuy the book. `+
+   `Whatever the money columns say, that is the number to decide on.`+
+   (ck===st?` <br>Withdrawing the entire gain that triggers the withdrawal puts every `+
+    `frozen seat back on the Safety Net each time, which is strip-to-a-level under `+
+    `another name - and that is what synchronises a book into dying all at once. `+
+    `Every rule on the 100% diagonal wipes out; nothing below it does.`:'');}
+ else if(c.cash_median<=0){al.style.display='';al.innerHTML=
+   `<b>This rule never banks anything.</b> With no cash coming back into the pot it `+
+   `buys ${D.never} seats out of the seed and then stops permanently.`;}
+ else al.style.display='none';
+ [...document.querySelectorAll('#t_grid tr')].forEach(tr=>
+  tr.classList.toggle('sel',tr.dataset.k===k));}
+
+function heat(){
+ const m=METRICS[metric];
+ [...document.querySelectorAll('.mb')].forEach(b=>
+  b.classList.toggle('on',b.dataset.m===metric));
+ Plotly.react('c_heat',[{
+  z:D.heat[metric],x:D.steps.map(s=>'$'+s.toLocaleString()),
+  y:D.chunks.map(c=>'$'+c.toLocaleString()),
+  text:D.txt[metric],texttemplate:'%{text}',textfont:{size:10.5},
+  type:'heatmap',colorscale:[[0,m[1]],[1,m[2]]],hoverongaps:false,
+  xgap:2,ygap:2,colorbar:{title:{text:m[0],side:'right'},thickness:12},
+  hovertemplate:'withdraw %{y} per %{x} gained<br>'+m[0]+': %{z:,.0f}<extra></extra>'}],
+  Object.assign({margin:{l:80,r:20,t:30,b:52},font:F,
+   title:{text:m[0]+' - click a cell to load it',x:0,font:{size:13}},
+   xaxis:{title:'per this much lifetime gain',type:'category'},
+   yaxis:{title:'withdraw this much',type:'category'}},BG),CFG);
+ document.getElementById('c_heat').on('plotly_click',ev=>{
+  const p=ev.points[0];
+  document.getElementById('sel_ck').value=D.chunks[p.pointIndex[0]];
+  document.getElementById('sel_st').value=D.steps[p.pointIndex[1]];
+  draw();window.scrollTo({top:0,behavior:'smooth'});});}
+
+document.getElementById('sel_ck').innerHTML=D.chunks.map(c=>
+ `<option value="${c}">$${c.toLocaleString()}</option>`).join('');
+document.getElementById('sel_st').innerHTML=D.steps.map(s=>
+ `<option value="${s}">$${s.toLocaleString()}</option>`).join('');
+document.getElementById('sel_ck').value=D.def_ck;
+document.getElementById('sel_st').value=D.def_st;
+document.getElementById('sel_ck').onchange=draw;
+document.getElementById('sel_st').onchange=draw;
+document.getElementById('mbtns').innerHTML=Object.keys(METRICS).map(k=>
+ `<button class="mb" data-m="${k}">${METRICS[k][0]}</button>`).join('');
+[...document.querySelectorAll('.mb')].forEach(b=>
+ b.onclick=()=>{metric=b.dataset.m;heat();});
+const HDR=['withdraw','per gain of','rate','net MEDIAN $','cash MEDIAN $',
+ 'equity left $','net p10 $','wipeout windows %','blowups','seats bought'];
+const KEYS=['ck','st','rate','net_median','cash_median','equity_median','net_p10',
+ 'wipeout_pct','blowups','seats_median'];
+document.getElementById('t_grid').innerHTML='<table><thead><tr>'+
+ HDR.map(h=>'<th>'+h+'</th>').join('')+'</tr></thead><tbody>'+
+ D.rows.map(r=>`<tr data-k="${key(r.ck,r.st)}" style="cursor:pointer">`+
+  KEYS.map(c=>{let v=r[c];
+   if(c==='ck'||c==='st')v='$'+v.toLocaleString();
+   else if(c==='rate')v=v+'%';
+   else if(typeof v==='number')v=v.toLocaleString();
+   return `<td>${v}</td>`;}).join('')+'</tr>').join('')+'</tbody></table>';
+[...document.querySelectorAll('#t_grid tr[data-k]')].forEach(tr=>tr.onclick=()=>{
+ const p=tr.dataset.k.split('_');
+ document.getElementById('sel_ck').value=p[0];
+ document.getElementById('sel_st').value=p[1];
+ draw();window.scrollTo({top:0,behavior:'smooth'});});
+document.getElementById('foot').textContent=
+ `code ${D.git} · generated ${D.gen} · one illustrative path per rule for the charts, `+
+ `medians of ${D.nwin} overlapping windows for the grid. The withdrawal rule is fitted `+
+ `to this sample and has not been validated out-of-sample.`;
+heat();draw();
+</script></body></html>"""
+
+
+def build_explorer(payload):
+    try:
+        import plotly.offline as po
+    except ImportError:
+        return
+    payload["gen"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+    payload["git"] = git_rev()
+    html = (_EXP_TPL.replace("__PLOTLYJS__", po.get_plotlyjs())
+            .replace("__RRV__", f"{payload['rr']:g}")
+            .replace("__DDV__", f"{payload['dd']:,.0f}")
+            .replace("__SNV__", f"{payload['safety']:,.0f}")
+            .replace("__COSTV__", f"{payload['cost']:,.0f}")
+            .replace("__SEEDV__", f"{payload['seed']:,.0f}")
+            .replace("__IVLV__", str(payload["interval_days"]))
+            .replace("__SEATSV__", str(payload["seat_cap"]))
+            .replace("__NEVERV__", str(payload["never"]))
+            .replace("__NWIN__", str(payload["nwin"]))
+            .replace("__HZV__", f"{payload['horizon']:g}")
+            .replace("__DATA__", json.dumps(payload, separators=(",", ":"),
+                                            default=str)))
+    RESULTS.mkdir(exist_ok=True)
+    out = RESULTS / "bootstrap_explorer.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"Saved {out}")
+
+
 # ----------------------------------------------------------------- main ----
 def main():
     ap = argparse.ArgumentParser(description=__doc__.strip().split("\n")[3])
@@ -985,8 +1250,6 @@ def main():
     ap.add_argument("--max-per-event", type=int, default=1,
                     help="seats bought at one time. 1 staggers; higher stacks "
                          "identical seats that then die together.")
-    ap.add_argument("--reserve", type=float, default=0.0,
-                    help="cash held back before any purchase (bootstrap mode)")
     ap.add_argument("--withdraw-chunk", type=float, default=None,
                     help="ratchet: withdraw in units of this (default: one seat)")
     ap.add_argument("--withdraw-step", type=float, default=1000.0,
@@ -995,6 +1258,9 @@ def main():
                     help="trader's share of profit (real plans are 0.8-0.9)")
     ap.add_argument("--horizon", type=float, default=2.0,
                     help="years per book window in the robustness sweep")
+    ap.add_argument("--no-explore", action="store_true",
+                    help="skip results/bootstrap_explorer.html, which is most of "
+                         "the runtime")
     a = ap.parse_args()
 
     rule = Rule(dd=a.dd, frozen_floor=a.frozen_dd_floor, cost=a.cost,
@@ -1002,7 +1268,7 @@ def main():
     cfg = BookCfg(seats=a.seats, seed=a.seed, interval_days=a.interval_days,
                   policy=a.start_policy, profit_trigger=a.profit_trigger,
                   dd_trigger=a.dd_trigger, min_days=a.min_days_between_starts,
-                  max_per_event=a.max_per_event, reserve=a.reserve)
+                  max_per_event=a.max_per_event)
     chunk = a.withdraw_chunk if a.withdraw_chunk else rule.cost
     HARD = Harvest("level", keep=rule.safety_net)
 
@@ -1095,14 +1361,13 @@ def main():
     # inherited from the CLI, so a label like "1/interval" cannot be quietly
     # falsified by --max-per-event. CLI settings get their own row at the end.
     def boot(**kw):
-        base = {**cfg.__dict__, "funding": "cash", "max_per_event": 1,
-                "reserve": 0.0}
+        base = {**cfg.__dict__, "funding": "cash", "max_per_event": 1}
         return BookCfg(**{**base, **kw})
 
     POLICIES = [
         ("subscription", BookCfg(**{**cfg.__dict__, "funding": "external",
-                                    "seed": 0.0, "max_per_event": 1,
-                                    "reserve": 0.0}), Harvest("none")),
+                                    "seed": 0.0, "max_per_event": 1}),
+         Harvest("none")),
         # the old winner, kept as the baseline the new conditions have to beat
         ("bootstrap · all-in, strip to net",
          boot(max_per_event=cfg.seats), HARD),
@@ -1126,22 +1391,16 @@ def main():
         POLICIES.append((f"bootstrap · 1/interval, ${ck:,.0f} per ${st_:,.0f} "
                          f"({ck / st_:.0%})",
                          boot(), Harvest("ratchet", chunk=ck, step=st_)))
-    for rsv in (2, 5):
-        POLICIES.append((f"bootstrap · 1/interval, ${chunk:,.0f} per $1,000 + "
-                         f"{rsv}-seat reserve", boot(reserve=rsv * rule.cost),
-                         Harvest("ratchet", chunk=chunk, step=1000.0)))
     # Whatever the CLI actually asked for, if it is not already in the menu.
-    if (a.max_per_event != 1 or a.reserve or a.withdraw_step != 1000.0
-            or a.withdraw_chunk):
+    if a.max_per_event != 1 or a.withdraw_step != 1000.0 or a.withdraw_chunk:
         POLICIES.append((
             f"bootstrap · custom: {a.max_per_event}/event, ${chunk:,.0f} per "
-            f"${a.withdraw_step:,.0f}"
-            + (f", ${a.reserve:,.0f} reserve" if a.reserve else ""),
-            boot(max_per_event=a.max_per_event, reserve=a.reserve),
+            f"${a.withdraw_step:,.0f}",
+            boot(max_per_event=a.max_per_event),
             Harvest("ratchet", chunk=chunk, step=a.withdraw_step)))
 
-    rowsr = []
-    for label, c, h in POLICIES:
+    def score(c: BookCfg, h: Harvest) -> dict:
+        """Run one policy across every window and reduce it to comparable stats."""
         res = [run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, c)
                for _, j, k in q_starts]
         cashes = np.array([r["cash"] for r in res]) * a.split
@@ -1150,8 +1409,7 @@ def main():
         # so its net is equity minus what was spent. For the bootstrap nothing
         # external goes in, so realized cash is the number that matters.
         nets = cashes + equities - np.array([r["spent"] for r in res])
-        rowsr.append({
-            "policy": label,
+        return {
             "withdraw": h.label,
             "ruin_rate": "n/a" if c.funding == "external"
                          else f"{np.mean([r['ruined'] for r in res]):.0%}",
@@ -1159,6 +1417,8 @@ def main():
             # count: wipeouts are rare enough per window that a median of 0 hides
             # a policy which loses the whole book several times over a long run.
             "wipeout_rate": f"{np.mean([r['wipeouts'] > 0 for r in res]):.0%}",
+            "wipeout_pct": round(100 * float(np.mean([r["wipeouts"] > 0
+                                                      for r in res]))),
             "wipeouts": round(float(np.mean([r["wipeouts"] for r in res])), 2),
             "blowups": int(np.median([r["deaths"] for r in res])),
             "spent": round(float(np.median([r["spent"] for r in res]))),
@@ -1170,8 +1430,10 @@ def main():
             "net_median": round(np.median(nets)),
             "seats_median": int(np.median([r["bought"] for r in res])),
             "starts_median": int(np.median([r["starts"] for r in res])),
-        })
-    RB = pd.DataFrame(rowsr)
+        }
+
+    RB = pd.DataFrame([{"policy": label, **score(c, h)}
+                       for label, c, h in POLICIES])
     cols = ["policy", "withdraw", "ruin_rate", "wipeout_rate", "wipeouts", "blowups",
             "cash_median", "equity_median", "net_p10", "net_median", "seats_median"]
     print(RB[cols].to_string(index=False))
@@ -1320,6 +1582,101 @@ def main():
     print("-" * 88)
     print(f"  strategy (one slot)  {bar_payload(m_strat)['note']}")
     print(f"  book (illustrative)  {bar_payload(m_book)['note']}")
+
+    # ---- the bootstrap explorer: a grid over (withdraw, per gain) -----------
+    if not a.no_explore:
+        CHUNKS = [200.0, 400.0, 600.0, 1000.0, 1500.0, 2000.0]
+        STEPS = [400.0, 600.0, 1000.0, 1500.0, 2000.0, 3000.0, 5000.0]
+        base = pd.Timestamp(ex[0]).normalize()
+
+        def offsets(days):
+            return [int((pd.Timestamp(d) - base).days) for d in days]
+
+        def cell_book(b):
+            """Same shape as the main report, but dates as day offsets.
+
+            Thirty-odd books each carrying a line per purchase date is the whole
+            page weight, and an ISO date string costs three times what its day
+            offset does.
+            """
+            s = b["series"]
+            ds = thin(s.groupby(s["day"].dt.date).last().reset_index(drop=True), 420)
+            ycum = s.assign(y=s["day"].dt.year).groupby("y")["withdrawn"].last()
+            yr = (ycum.diff().fillna(ycum.iloc[0]) * a.split).round()
+            groups: dict[int, list] = {}
+            for seat in b["seats"]:
+                groups.setdefault(seat["i0"], []).append(seat)
+            curves = []
+            for i0 in sorted(groups):
+                g = groups[i0]
+                pts = thin(g[0]["path"], 90)
+                curves.append({"o": offsets(p[0] for p in pts),
+                               "y": [round(p[1]) for p in pts],
+                               "n": len(g),
+                               "d": g[0]["start"].strftime("%Y-%m-%d")})
+            return {"o": offsets(ds["day"]),
+                    "live": [int(v) for v in ds["live"]],
+                    "cash": [round(float(v)) for v in ds["withdrawn"]],
+                    "eq": [round(float(v)) for v in ds["equity"]],
+                    "yx": [str(i) for i in yr.index],
+                    "yy": [float(v) for v in yr],
+                    "curves": curves}
+
+        print("\n" + "=" * 88)
+        print(f"BOOTSTRAP EXPLORER — {sum(1 for c in CHUNKS for s in STEPS if c <= s)} "
+              f"withdrawal rules, each over {len(q_starts)} windows plus a full run")
+        print("=" * 88)
+        cells, rows = {}, []
+        for ck in CHUNKS:
+            for st_ in STEPS:
+                if ck > st_:          # withdrawing more than the gain that
+                    continue          # triggers it is just the diagonal again
+                h = Harvest("ratchet", chunk=ck, step=st_)
+                c = boot()
+                stats = score(c, h)
+                full = run_book(ex, net, mae, mfe, h, rule, c, trace=True)
+                cells[f"{ck:g}_{st_:g}"] = {**stats, "book": cell_book(full)}
+                rows.append({"ck": ck, "st": st_,
+                             "rate": round(100 * ck / st_), **stats})
+        G = pd.DataFrame(rows)
+        best_cell = G.loc[G[G["wipeout_pct"] == 0]["net_median"].idxmax()] \
+            if (G["wipeout_pct"] == 0).any() else G.loc[G["net_median"].idxmax()]
+        print(G[["ck", "st", "rate", "wipeout_pct", "blowups", "cash_median",
+                 "equity_median", "net_p10", "net_median",
+                 "seats_median"]].to_string(index=False))
+        print(f"\n  best net with no wipeout in any window: ${best_cell['ck']:,.0f} "
+              f"per ${best_cell['st']:,.0f} ({best_cell['rate']:.0f}%) -> "
+              f"net ${best_cell['net_median']:,.0f}, "
+              f"cash ${best_cell['cash_median']:,.0f}")
+
+        def matrix(col):
+            return [[(None if ck > st_ else
+                      float(G[(G.ck == ck) & (G.st == st_)][col].iloc[0]))
+                     for st_ in STEPS] for ck in CHUNKS]
+
+        def texts(col, fmt):
+            return [[("" if ck > st_ else
+                      fmt.format(G[(G.ck == ck) & (G.st == st_)][col].iloc[0]))
+                     for st_ in STEPS] for ck in CHUNKS]
+
+        build_explorer({
+            "rr": a.rr, "dd": rule.dd, "safety": rule.safety_net,
+            "cost": rule.cost, "seed": cfg.seed, "interval_days": cfg.interval_days,
+            "seat_cap": cfg.seats, "horizon": a.horizon, "nwin": len(q_starts),
+            "never": int(cfg.seed // rule.cost),
+            "base": int(base.timestamp() * 1000),
+            "chunks": [int(c) for c in CHUNKS], "steps": [int(s) for s in STEPS],
+            "def_ck": int(best_cell["ck"]), "def_st": int(best_cell["st"]),
+            "cells": cells, "rows": rows,
+            "heat": {"net": matrix("net_median"), "cash": matrix("cash_median"),
+                     "wipe": matrix("wipeout_pct"), "blow": matrix("blowups"),
+                     "seats": matrix("seats_median")},
+            "txt": {"net": texts("net_median", "{:,.0f}"),
+                    "cash": texts("cash_median", "{:,.0f}"),
+                    "wipe": texts("wipeout_pct", "{:.0f}%"),
+                    "blow": texts("blowups", "{:.0f}"),
+                    "seats": texts("seats_median", "{:.0f}")},
+        })
 
     short = lambda s: s.replace("bootstrap · ", "")
     sub_pl = book_payload(sub_bk, "subscription", full=True)
