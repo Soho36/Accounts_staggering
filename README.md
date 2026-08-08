@@ -113,6 +113,28 @@ adds to it. So **withdrawals are the only thing that funds growth** — which is
 and $200 a seat it buys exactly **6 seats**, one per interval, and then the pot is empty
 permanently. That is the whole explanation for the 6 in the table below.
 
+#### Equity is not buying power
+
+Purchases come out of the **cash balance**, never out of equity, and the balance is
+usually at or near zero because every dollar that arrives is spent on the next seat almost
+immediately. A book can therefore sit for a year holding $22,000 of equity and buy nothing.
+
+That is not a stall in the model, it is the ratchet working per seat. The rule pays out on
+**each seat's own** lifetime gain, so under `$200 per $1,000` a seat pays nothing until it
+has personally cleared $3,600 ($2,600 Safety Net + the $1,000 that triggers a payout). Nine
+seats averaging $2,500 are worth $22,500 together and are every one of them still below the
+Safety Net individually — so not one owes a withdrawal, and the pot stays empty.
+
+The explorer has a dedicated log-scale "cash on hand" panel for exactly this: below the
+$200 line the book cannot buy, whatever its equity says.
+
+#### Why `--seed 1200`
+
+No technical reason beyond `seed >= cost`, or the book can never make its first purchase.
+$1,200 is six seats at $200, and it came in with the original script (commit `b546d69`)
+rather than being derived from anything. It is a real free parameter and it drives the ruin
+rate harder than any other setting — worth sweeping if the bootstrap is the plan.
+
 ### Why a book dies all at once, and what actually fixes it
 
 Two seats bought on the same trade are not merely correlated, they are **identical** —

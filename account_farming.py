@@ -824,7 +824,9 @@ function drawPolicy(i){
   {x:b.x,y:b.cash,type:'scatter',mode:'lines',name:'cash withdrawn',
    yaxis:'y2',line:{width:2,color:'#15803d'}},
   {x:b.x,y:b.equity,type:'scatter',mode:'lines',name:'equity in live seats',
-   yaxis:'y2',line:{width:1.4,color:'#b07aa1',dash:'dot'}}],
+   yaxis:'y2',line:{width:1.4,color:'#b07aa1',dash:'dot'}},
+  {x:b.x,y:b.hand,type:'scatter',mode:'lines',name:'cash on hand (buying power)',
+   yaxis:'y2',line:{width:1.2,color:'#c2760c'}}],
   Object.assign({margin:{l:60,r:70,t:28,b:34},font:F,hovermode:'x unified',
    title:{text:'Seats live, cash out and equity - '+b.name,x:0,font:{size:13}},
    xaxis:{type:'date',gridcolor:'#eef0f3'},
@@ -1010,11 +1012,22 @@ never buy another. Any policy on this page that banks nothing behaves the same w
 <div id="stat" class="pstat"></div>
 <div class="warn" id="alert" style="display:none"></div>
 
-<div class="panel"><div id="c_book" style="height:390px"></div>
+<div class="panel"><div id="c_book" style="height:370px"></div>
  <div class="note">The pot and the book together: seats held (filled, left axis) against
  cumulative cash withdrawn and equity sitting in live seats (right axis). Every step down
  in the filled area is a liquidation; every step up is a purchase, which is only possible
- because the green line moved first.</div></div>
+ because the green line moved first.</div>
+ <div id="c_cash" style="height:210px"></div>
+ <div class="note"><b>This is the panel that explains the gaps.</b> It is the cash
+ <i>balance</i>, not the running total &mdash; the only thing a purchase can be paid from.
+ Below the dashed line the book cannot buy a seat no matter how much equity it is sitting
+ on, and it spends most of its life there, because every dollar that arrives is spent on
+ the next seat almost immediately.</div>
+ <div class="note">Equity is not buying power. The rule pays out on <b>each seat's own</b>
+ lifetime gain, so a wide, shallow book pays nothing: nine seats averaging $2,500 are worth
+ $22,500 together and are all still below the Safety Net individually, so not one of them
+ owes a withdrawal. Only a seat that has personally cleared
+ <span id="thresh"></span> pays anything at all.</div></div>
 
 <div class="panel"><div id="c_seats" style="height:420px"></div>
  <div class="note">One line per purchase date, equity plus cash that seat has already paid
@@ -1083,6 +1096,35 @@ function draw(){
    yaxis:{title:'seats',gridcolor:'#eef0f3',rangemode:'tozero'},
    yaxis2:{title:'$',overlaying:'y',side:'right',showgrid:false},
    legend:{orientation:'h',y:-.16}},BG),CFG);
+ // Log scale, because the pot runs from $0 to five figures while the decision
+ // it drives sits at $200 - on a linear axis the years that answer "why did it
+ // not buy" are squashed flat against zero. Zeros are floored to $1 to plot.
+ const lg=b.hand.map(v=>Math.max(v,1));
+ const buyable=b.hand.map(v=>v>=D.cost?Math.max(v,1):null);
+ Plotly.react('c_cash',[
+  {x:x(b.o),y:lg,type:'scatter',mode:'lines',name:'cash on hand',
+   line:{width:1.4,color:'#c2760c'},customdata:b.hand,
+   hovertemplate:'$%{customdata:,.0f} in the pot<extra></extra>'},
+  {x:x(b.o),y:buyable,type:'scatter',mode:'markers',name:'could afford a seat',
+   marker:{size:3.5,color:'#15803d'},connectgaps:false,hoverinfo:'skip'}],
+  Object.assign({margin:{l:62,r:70,t:26,b:30},font:F,
+   title:{text:'Cash on hand - buying power, not the running total (log scale)',
+    x:0,font:{size:12.5}},
+   xaxis:{type:'date',gridcolor:'#eef0f3'},
+   yaxis:{title:'$ in the pot',gridcolor:'#eef0f3',type:'log',
+    tickvals:[1,10,100,1000,10000,100000],
+    ticktext:['$0','$10','$100','$1k','$10k','$100k']},
+   shapes:[{type:'line',xref:'paper',x0:0,x1:1,y0:Math.log10(D.cost),
+    y1:Math.log10(D.cost),line:{color:'#b91c1c',width:1.2,dash:'dash'}}],
+   annotations:[{xref:'paper',x:0.995,y:Math.log10(D.cost),xanchor:'right',
+    text:'$'+D.cost.toLocaleString()+' = one seat',showarrow:false,
+    yshift:-9,bgcolor:'rgba(255,255,255,.85)',borderpad:2,
+    font:{size:10.5,color:'#b91c1c'}}],
+   legend:{orientation:'h',y:-.22}},BG),CFG);
+ document.getElementById('thresh').textContent=
+  '$'+(D.safety+st).toLocaleString()+' of lifetime value ($'+
+  D.safety.toLocaleString()+' Safety Net plus the $'+st.toLocaleString()+
+  ' that triggers a payout)';
  Plotly.react('c_seats',b.curves.map(s=>({
   x:x(s.o),y:s.y,type:'scatter',mode:'lines',showlegend:false,
   line:{width:1.2,color:'#4e79a7'},opacity:.55,
@@ -1546,6 +1588,7 @@ def main():
             "x": [str(d) for d in ds["day"]],
             "live": [int(v) for v in ds["live"]],
             "cash": [round(float(v)) for v in ds["withdrawn"]],
+            "hand": [round(float(v)) for v in ds["cash"]],
             "equity": [round(float(v)) for v in ds["equity"]],
             "year_x": [str(i) for i in yr.index],
             "year_y": [float(v) for v in yr],
@@ -1617,6 +1660,9 @@ def main():
             return {"o": offsets(ds["day"]),
                     "live": [int(v) for v in ds["live"]],
                     "cash": [round(float(v)) for v in ds["withdrawn"]],
+                    # The balance, not the running total: this is the only thing
+                    # a purchase can come out of, and it is usually near zero.
+                    "hand": [round(float(v)) for v in ds["cash"]],
                     "eq": [round(float(v)) for v in ds["equity"]],
                     "yx": [str(i) for i in yr.index],
                     "yy": [float(v) for v in yr],
