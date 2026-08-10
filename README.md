@@ -101,14 +101,23 @@ The simulator runs both funding models and scores every policy across all window
 
 **Mode 1 — subscription.** Own money, one seat every `--interval-days`, never withdraw,
 hold forever. Cannot be ruined, because funding is external. It fills to the seat cap and
-then only replaces deaths.
+then only replaces deaths. **`--seed` does not apply here** — mode 1 has no pot. Its own
+capital is `spent`, which accrues $200 at a time, on the interval, for as long as you keep
+running it (median $4,800 per 2-year window; $5,000 over the full sample).
 
 **Mode 2 — bootstrap.** The seats pay for their own replacements out of withdrawn cash.
 This is the one that can die permanently.
 
-There is exactly one pot of cash. It starts at `--seed`. A frozen seat pays money *into*
-it when the withdrawal rule fires; buying a seat takes `--cost` *out* of it. Nothing else
-adds to it. So **withdrawals are the only thing that funds growth** — which is why
+There is exactly one pot of cash, and **`--seed` is only ever this pot** — the one-time
+payment of your own money that gets the first seats trading. It is the *whole* of your
+capital in mode 2; nothing else goes in after it.
+
+The pot starts at `--seed`. A frozen seat pays money *into* it when the withdrawal rule
+fires; buying a seat takes `--cost` *out* of it. Nothing else adds to it.
+
+So both modes spend your own money, and the difference is the schedule: mode 1 pays $200
+forever, on the interval; mode 2 pays once at the start and never again. `net` subtracts
+both (`cash + equity − seed − spent`), which is what makes the two comparable. So **withdrawals are the only thing that funds growth** — which is why
 "never withdraw" under bootstrap funding is not a strategy but a dead end: at $1,200 seed
 and $200 a seat it buys exactly **6 seats**, one per interval, and then the pot is empty
 permanently. That is the whole explanation for the 6 in the table below.
@@ -128,12 +137,42 @@ Safety Net individually — so not one owes a withdrawal, and the pot stays empt
 The explorer has a dedicated log-scale "cash on hand" panel for exactly this: below the
 $200 line the book cannot buy, whatever its equity says.
 
-#### Why `--seed 1200`
+#### Why `--seed 1200`, and how low it can go
 
-No technical reason beyond `seed >= cost`, or the book can never make its first purchase.
-$1,200 is six seats at $200, and it came in with the original script (commit `b546d69`)
-rather than being derived from anything. It is a real free parameter and it drives the ruin
-rate harder than any other setting — worth sweeping if the bootstrap is the plan.
+$1,200 is six seats at $200. It came in with the original script (commit `b546d69`) rather
+than being derived from anything.
+
+The only hard floor is **`seed >= cost`**. Below one seat's price it is a *deadlock*, not a
+slow start: buying needs cash, cash only ever arrives from a withdrawal, and a withdrawal
+needs a live seat. `--seed 100` used to produce a silent run of zeroes flagged "ruined";
+it now errors out and says why.
+
+So **`--seed 200` is the purest bootstrap** — one seat of your own money, every seat after
+it paid for out of profit. It works, and on the full sample it turned $200 into 28 seats
+and $455k. But that is one path. Swept across the 18 windows at `$200 per $400`:
+
+| seed | ruin rate | wipeout rate | net p10 | net median | seats |
+|---|---|---|---|---|---|
+| $200 | **39%** | 39% | −$200 | $17,649 | 10 |
+| $400 | 28% | 28% | −$400 | $37,596 | 16 |
+| $600 | 22% | 22% | −$600 | $47,920 | 17 |
+| $800 | 6% | 6% | $2,264 | $67,849 | 19 |
+| $1,000 | 6% | 6% | $2,184 | $68,410 | 20 |
+| $1,200 | **0%** | 0% | $5,043 | $68,410 | 21 |
+| $2,000 | 0% | 0% | $6,163 | $68,410 | 23 |
+| $4,000 | 0% | 0% | $7,775 | $68,410 | 24 |
+
+Starting from a single seat loses everything in **39%** of windows, and the p10 outcome is
+losing the whole stake. The direct cause: **21% of possible start dates give a seat that
+dies without ever paying out $200**, and from a one-seat book that is game over on the spot.
+The rest is gambler's ruin on a very thin buffer.
+
+Note where the curve flattens. Median net is identical from $1,200 upward — **extra seed
+buys no upside at all, only survival**. It moves the p10 from −$200 to about $7,800 and the
+ruin rate from 39% to 0%, and does nothing to the typical outcome. The inherited $1,200
+default happens to sit exactly where ruin reaches zero on this sample, which is a
+coincidence worth distrusting rather than a result: it is fitted to these 18 overlapping
+windows like everything else here.
 
 ### Why a book dies all at once, and what actually fixes it
 
@@ -190,6 +229,35 @@ been removed from the code.)*
 ### Mode 1 vs Mode 2 over the full period
 
 One path each, not an expectation.
+
+### The all-in book looks best on one path and is the worst bet on the distribution
+
+Over the single full 6.5-year run, all-in strip-to-net banks $557,843 of cash and ends
+with almost no equity — which looks like the winner, since it is all money in hand. It is
+not:
+
+| over one full 6.5y path | own money in | cash out | equity | **net** | blowups | wipeouts |
+|---|---|---|---|---|---|---|
+| subscription | $5,000 | $0 | $564,063 | **$559,063** | 5 | 0 |
+| all-in, strip to net | $1,200 | $557,843 | $9,355 | **$535,198** | 140 | 7 |
+| $200 per $400 | $1,200 | $242,000 | $261,599 | **$496,599** | 15 | 0 |
+
+Even on the path that flatters it, all-in nets *less* than the subscription. It bought 160
+seats and liquidated 140 of them to get there.
+
+And that single path is the survivor. Across all 18 windows:
+
+| | ended below what you put in | worst window | wipeout rate | net p10 | net median |
+|---|---|---|---|---|---|
+| subscription | **0%** | +$2,009 | 0% | $36,734 | $66,283 |
+| all-in, strip to net | **22%** | **−$4,804** | 50% | **−$1,200** | $148,025 |
+| 1/interval, strip to net | 0% | +$3,478 | 33% | $8,302 | $46,234 |
+| $200 per $400 | 6% | −$13 | **0%** | $5,043 | **$68,410** |
+
+All-in does have the highest median net, by a wide margin — that part is real. But it ends
+**below the money you put in 22% of the time**, its p10 is losing the entire seed, and it
+loses the whole book at least once in half of all windows. It is the highest-median and the
+only losing bet in the table.
 
 | | Mode 1 subscription | Mode 2, $200 per $400 |
 |---|---|---|
@@ -254,7 +322,8 @@ The book:
 
 - `--cost N` — price of one seat
 - `--seats N` — cap on concurrent accounts (a firm rule, not a maths question)
-- `--seed N` — starting cash for bootstrap mode
+- `--seed N` — the one-time pot of own money for **bootstrap mode only**; mode 1 ignores
+  it. Must be at least `--cost`, or the book can never buy its first seat
 - `--interval-days N` — calendar days between new account starts
 - `--start-policy time|profit|dd|any` — what triggers a start; `any` combines them
 - `--profit-trigger N` / `--dd-trigger N` — thresholds for those triggers

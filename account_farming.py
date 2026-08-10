@@ -894,11 +894,11 @@ function tbl(id,rows,cols,hdr){document.getElementById(id).innerHTML=
  rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v==null)v='';
   if(typeof v==='number')v=v.toLocaleString();
   return `<td>${v}</td>`;}).join('')+'</tr>').join('')+'</tbody></table>';}
-tbl('t_keep',D.robust,['policy','withdraw','ruin_rate','wipeout_rate','wipeouts',
- 'blowups','cash_p10','cash_median','cash_p90','equity_median','net_p10',
- 'net_median','seats_median'],
- ['policy','withdraws','ruin rate','windows with a wipeout','wipeouts (mean)',
-  'blowups (median)','cash p10 $','cash MEDIAN $','cash p90 $',
+tbl('t_keep',D.robust,['policy','withdraw','below_water','worst','wipeout_rate',
+ 'ruin_rate','blowups','cash_median','equity_median','net_p10','net_median',
+ 'seats_median'],
+ ['policy','withdraws','ended BELOW what you put in','worst window net $',
+  'windows with a wipeout','ruin rate','blowups (median)','cash MEDIAN $',
   'equity left (median) $','net p10 $','net MEDIAN $','seats bought (median)']);
 tbl('t_pick',D.pick,['want','policy','why'],
  ['if what you care about is...','then take','the numbers behind it']);
@@ -1314,6 +1314,17 @@ def main():
     chunk = a.withdraw_chunk if a.withdraw_chunk else rule.cost
     HARD = Harvest("level", keep=rule.safety_net)
 
+    # A bootstrap book cannot start below one seat's price: buying needs cash,
+    # cash only arrives from a withdrawal, and a withdrawal needs a live seat.
+    # Below the cost that is a deadlock, not a slow start, and it would other-
+    # wise show up as a silent run of zeroes flagged "ruined".
+    if a.seed < rule.cost:
+        ap.error(f"--seed {a.seed:,.0f} is below --cost {rule.cost:,.0f}. The "
+                 f"bootstrap can never buy its first seat, so nothing would "
+                 f"happen at all: seats are what generate the withdrawals that "
+                 f"buy seats. ${rule.cost:,.0f} is the true minimum (one seat of "
+                 f"your own money, everything after it out of profit).")
+
     st = build_stream(a)
     ex, net, mae, mfe = st["ex"], st["net"], st["mae"], st["mfe"]
     gross = float((net + COMMISSION_ROUNDTURN).sum())
@@ -1447,10 +1458,11 @@ def main():
                for _, j, k in q_starts]
         cashes = np.array([r["cash"] for r in res]) * a.split
         equities = np.array([r["equity"] for r in res]) * a.split
-        # For the subscription the seats are bought with the trader's own money,
-        # so its net is equity minus what was spent. For the bootstrap nothing
-        # external goes in, so realized cash is the number that matters.
-        nets = cashes + equities - np.array([r["spent"] for r in res])
+        # Net has to charge every dollar of the trader's own money, whichever way
+        # it went in: `spent` for the subscription, which pays per seat forever,
+        # and the seed for the bootstrap, which pays once up front. Leaving the
+        # seed out overstated every bootstrap net by exactly one seed.
+        nets = (cashes + equities - np.array([r["spent"] for r in res]) - c.seed)
         return {
             "withdraw": h.label,
             "ruin_rate": "n/a" if c.funding == "external"
@@ -1470,14 +1482,19 @@ def main():
             "equity_median": round(np.median(equities)),
             "net_p10": round(np.percentile(nets, 10)),
             "net_median": round(np.median(nets)),
+            # The plainest question anyone actually has: how often did I end up
+            # with less than I put in? Medians hide this completely.
+            "below_water": f"{np.mean(nets <= 0):.0%}",
+            "worst": round(float(nets.min())),
             "seats_median": int(np.median([r["bought"] for r in res])),
             "starts_median": int(np.median([r["starts"] for r in res])),
         }
 
     RB = pd.DataFrame([{"policy": label, **score(c, h)}
                        for label, c, h in POLICIES])
-    cols = ["policy", "withdraw", "ruin_rate", "wipeout_rate", "wipeouts", "blowups",
-            "cash_median", "equity_median", "net_p10", "net_median", "seats_median"]
+    cols = ["policy", "withdraw", "below_water", "worst", "wipeout_rate", "ruin_rate",
+            "blowups", "cash_median", "equity_median", "net_p10", "net_median",
+            "seats_median"]
     print(RB[cols].to_string(index=False))
     print("\n  cash_* is REALIZED, withdrawn money. equity_median is still sitting in")
     print("  live accounts and can be lost — do not add the two and call it profit.")
