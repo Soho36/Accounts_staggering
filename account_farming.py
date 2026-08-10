@@ -44,8 +44,12 @@ raises the floor even if it closes lower, and one that dips to -MAE can hit the
 floor without ever closing there. Closed-trade P&L understates both. The sweep
 gives the two extremes but not their order within a trade, so `--intratrade-path`
 stays a switch. MAE-first is the default because it reproduced MT5's equity
-drawdown exactly on every pass tested in the source project; MFE-first is the
-optimistic case, since lifting the floor before the dip can save a seat.
+drawdown exactly on every pass tested in the source project.
+
+MFE-first is the CONSERVATIVE case, not the optimistic one: it lifts the peak,
+and therefore the floor, before the adverse excursion is tested against it, so
+the floor is always at least as high and liquidation always at least as likely.
+A higher floor is less cushion, never more.
 
 CAUTION: this is LEVERAGE, not alpha. Every seat trades identical signals and
 differs only by start date. N seats is N contracts, and a drawdown deep enough
@@ -143,6 +147,11 @@ class BookCfg:
     # old "buy everything affordable" behaviour is max_per_event = seats.
     max_per_event: int = 1
     funding: str = "cash"           # cash = bootstrap | external = subscription
+    # The trader's share of a payout. It has to bite when the money arrives, not
+    # when the report is printed: at an 80% split only 80% ever reaches the pot,
+    # so only 80% is available to buy the next seat. Scaling the answer at the
+    # end instead lets the book compound on money it never received.
+    split: float = 1.0
 
 
 # ---------------------------------------------------------------- input ----
@@ -381,7 +390,7 @@ def due(a, rule: Rule, h: Harvest) -> float:
 
 def step(a, n, ma, mf, h: Harvest, rule: Rule):
     """Advance one account by one trade. Returns cash withdrawn on this trade."""
-    if rule.mfe_first:                                 # optimistic ordering
+    if rule.mfe_first:                                 # conservative ordering
         _lift(a, mf, rule)
     if a["eq"] + min(ma, 0.0) <= a["floor"]:           # intraday dip kills it
         a["alive"] = False
@@ -450,8 +459,44 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
     hard = Harvest("level", keep=rule.safety_net)
     cash, live, bought, deaths, withdrawn, spent = cfg.seed, [], 0, 0, 0.0, 0.0
     last_start, series, ruined, done, wipeouts = None, [], False, [], 0
+    worst_wipe = 0          # most seats ever lost in a single collapse
     for i in range(len(net)):
         day = pd.Timestamp(ex[i])
+
+        # 1. Apply the trade to the seats that were already open. Buying happens
+        #    afterwards, because ex[i] is this trade's EXIT: an account opened at
+        #    that moment cannot have been holding the trade that just closed.
+        k = hard if (cfg.adaptive and len(live) < cfg.seats) else h
+        got = 0.0
+        for a in live:
+            got += step(a, net[i], mae[i], mfe[i], k, rule)
+            if trace:
+                a["path"].append((day, a["eq"] + a["banked"]))
+        got *= cfg.split                               # only the trader's share
+        cash += got
+        withdrawn += got
+
+        # 2. Bury the dead.
+        n0 = len(live)
+        if trace:
+            done.extend(a for a in live if not a["alive"])
+        for a in live:
+            if not a["alive"]:
+                a["end"] = day
+        live = [a for a in live if a["alive"]]
+        deaths += n0 - len(live)
+        # Seats bought together are identical, so they die together. Losing the
+        # whole book at once is survivable while cash can rebuy it, which is why
+        # it never shows up in the ruin rate - count it separately. Record how
+        # big the book was: a lone starter seat dying is not the same event as
+        # twenty seats going together, and counting them alike hides the
+        # difference between a slow start and a catastrophe.
+        if n0 and not live:
+            wipeouts += 1
+            worst_wipe = max(worst_wipe, n0)
+
+        # 3. Buy, from whatever is in the pot now. The new seat starts trading on
+        #    the next trade in the stream.
         if len(live) < cfg.seats and should_start(live, day, last_start, cfg):
             room = cfg.seats - len(live)
             if cfg.funding == "external":
@@ -463,7 +508,7 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
                 # seed/cost seats and then stops for good.
                 n_buy = min(cfg.max_per_event, room, int(cash // rule.cost))
             for _ in range(max(0, n_buy)):
-                a = new_account(i, rule)
+                a = new_account(i + 1, rule)
                 a["start"] = day
                 if trace:
                     a["path"] = [(day, 0.0)]
@@ -475,28 +520,6 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
                 bought += 1
                 last_start = day
 
-        k = hard if (cfg.adaptive and len(live) < cfg.seats) else h
-        got = 0.0
-        for a in live:
-            got += step(a, net[i], mae[i], mfe[i], k, rule)
-            if trace:
-                a["path"].append((day, a["eq"] + a["banked"]))
-        cash += got
-        withdrawn += got
-
-        n0 = len(live)
-        if trace:
-            done.extend(a for a in live if not a["alive"])
-        for a in live:
-            if not a["alive"]:
-                a["end"] = day
-        live = [a for a in live if a["alive"]]
-        deaths += n0 - len(live)
-        # Seats bought together are identical, so they die together. Losing the
-        # whole book at once is survivable while cash can rebuy it, which is why
-        # it never shows up in the ruin rate - count it separately.
-        if n0 and not live:
-            wipeouts += 1
         if cfg.funding == "cash" and not live and cash < rule.cost:
             ruined = True                              # absorbing state
         equity = sum(a["eq"] for a in live)
@@ -509,7 +532,8 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
     return {"series": S, "bought": bought, "deaths": deaths, "cash": cash,
             "equity": equity, "withdrawn": withdrawn, "spent": spent,
             "live": len(live), "ruined": ruined, "seats": done + live,
-            "wipeouts": wipeouts, "starts": len({a["i0"] for a in done + live}),
+            "wipeouts": wipeouts, "worst_wipe": worst_wipe,
+            "starts": len({a["i0"] for a in done + live}),
             "wealth": cash + equity - cfg.seed - spent}
 
 
@@ -894,11 +918,13 @@ function tbl(id,rows,cols,hdr){document.getElementById(id).innerHTML=
  rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v==null)v='';
   if(typeof v==='number')v=v.toLocaleString();
   return `<td>${v}</td>`;}).join('')+'</tr>').join('')+'</tbody></table>';}
-tbl('t_keep',D.robust,['policy','withdraw','below_water','worst','wipeout_rate',
- 'ruin_rate','blowups','cash_median','equity_median','net_p10','net_median',
- 'seats_median'],
+tbl('t_keep',D.robust,['policy','withdraw','below_water','worst','collapse_rate',
+ 'worst_wipe','wipeout_rate','ruin_rate','blowups','drawn_median','cash_median',
+ 'equity_median','net_p10','net_median','seats_median'],
  ['policy','withdraws','ended BELOW what you put in','worst window net $',
-  'windows with a wipeout','ruin rate','blowups (median)','cash MEDIAN $',
+  'windows that lost a REAL book (5+ seats)','biggest book lost (seats)',
+  'windows that hit zero seats','ruin rate','blowups (median)',
+  'total withdrawn (median) $','cash IN HAND (median) $',
   'equity left (median) $','net p10 $','net MEDIAN $','seats bought (median)']);
 tbl('t_pick',D.pick,['want','policy','why'],
  ['if what you care about is...','then take','the numbers behind it']);
@@ -1062,7 +1088,7 @@ let metric='net';
 const METRICS={
  net:['net, median $','#eef7f0','#15803d'],
  cash:['cash withdrawn, median $','#eef3f9','#2b6cb0'],
- wipe:['windows that lost the whole book %','#fdf1f1','#b91c1c'],
+ wipe:['windows that lost a real book of 5+ seats %','#fdf1f1','#b91c1c'],
  blow:['seats liquidated, median','#fdf5ec','#c2760c'],
  seats:['seats bought, median','#f4f1f8','#6b46c1']};
 
@@ -1149,13 +1175,13 @@ function draw(){
   `<span>cash <b>${money(c.cash_median)}</b></span>`+
   `<span>equity left <b>${money(c.equity_median)}</b></span>`+
   `<span>net p10 <b>${money(c.net_p10)}</b></span>`+
-  `<span>lost the whole book in <b class="${c.wipeout_pct?'bad':'ok'}">`+
-   `${c.wipeout_pct}%</b> of windows</span>`+
+  `<span>lost a book of 5+ seats in <b class="${c.collapse_pct?'bad':'ok'}">`+
+   `${c.collapse_pct}%</b> of windows (biggest lost: ${c.worst_wipe})</span>`+
   `<span>blowups <b>${c.blowups}</b></span>`+
   `<span>seats <b>${c.seats_median}</b></span>`;
  const al=document.getElementById('alert');
- if(c.wipeout_pct>0){al.style.display='';al.innerHTML=
-   `<b>This rule lost every seat it held in ${c.wipeout_pct}% of windows.</b> `+
+ if(c.collapse_pct>0){al.style.display='';al.innerHTML=
+   `<b>This rule lost a whole book of ${c.worst_wipe} seats in ${c.collapse_pct}% of windows.</b> `+
    `It survives on this page only because withdrawn cash could rebuy the book. `+
    `Whatever the money columns say, that is the number to decide on.`+
    (ck===st?` <br>Withdrawing the entire gain that triggers the withdrawal puts every `+
@@ -1202,10 +1228,11 @@ document.getElementById('mbtns').innerHTML=Object.keys(METRICS).map(k=>
  `<button class="mb" data-m="${k}">${METRICS[k][0]}</button>`).join('');
 [...document.querySelectorAll('.mb')].forEach(b=>
  b.onclick=()=>{metric=b.dataset.m;heat();});
-const HDR=['withdraw','per gain of','rate','net MEDIAN $','cash MEDIAN $',
- 'equity left $','net p10 $','wipeout windows %','blowups','seats bought'];
+const HDR=['withdraw','per gain of','rate','net MEDIAN $','cash IN HAND $',
+ 'equity left $','net p10 $','lost a 5+ seat book %','biggest book lost',
+ 'blowups','seats bought'];
 const KEYS=['ck','st','rate','net_median','cash_median','equity_median','net_p10',
- 'wipeout_pct','blowups','seats_median'];
+ 'collapse_pct','worst_wipe','blowups','seats_median'];
 document.getElementById('t_grid').innerHTML='<table><thead><tr>'+
  HDR.map(h=>'<th>'+h+'</th>').join('')+'</tr></thead><tbody>'+
  D.rows.map(r=>`<tr data-k="${key(r.ck,r.st)}" style="cursor:pointer">`+
@@ -1273,7 +1300,9 @@ def main():
     ap.add_argument("--intratrade-path", choices=("mae-first", "mfe-first"),
                     default="mae-first",
                     help="Unknown MAE/MFE ordering within a trade. mae-first "
-                         "reproduced MT5; mfe-first is the optimistic case.")
+                         "reproduced MT5; mfe-first is the CONSERVATIVE case "
+                         "(it raises the floor before testing the dip against "
+                         "it, so liquidation is at least as likely).")
 
     ap.add_argument("--cost", type=float, default=200.0, help="Price of one seat.")
     ap.add_argument("--seats", type=int, default=20,
@@ -1310,7 +1339,7 @@ def main():
     cfg = BookCfg(seats=a.seats, seed=a.seed, interval_days=a.interval_days,
                   policy=a.start_policy, profit_trigger=a.profit_trigger,
                   dd_trigger=a.dd_trigger, min_days=a.min_days_between_starts,
-                  max_per_event=a.max_per_event)
+                  max_per_event=a.max_per_event, split=a.split)
     chunk = a.withdraw_chunk if a.withdraw_chunk else rule.cost
     HARD = Harvest("level", keep=rule.safety_net)
 
@@ -1456,8 +1485,14 @@ def main():
         """Run one policy across every window and reduce it to comparable stats."""
         res = [run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, c)
                for _, j, k in q_starts]
-        cashes = np.array([r["cash"] for r in res]) * a.split
-        equities = np.array([r["equity"] for r in res]) * a.split
+        # `cash` is the pot BALANCE - what is left after seats were rebought out
+        # of it - and it is already net of the split, which run_book applies at
+        # payout. `withdrawn` is the gross total ever taken out, which is a
+        # different and larger number; both are reported rather than conflated.
+        cashes = np.array([r["cash"] for r in res])
+        drawn = np.array([r["withdrawn"] for r in res])
+        # Equity is unrealized and would still be split on the way out.
+        equities = np.array([r["equity"] for r in res]) * c.split
         # Net has to charge every dollar of the trader's own money, whichever way
         # it went in: `spent` for the subscription, which pays per seat forever,
         # and the seed for the bootstrap, which pays once up front. Leaving the
@@ -1471,6 +1506,12 @@ def main():
             # count: wipeouts are rare enough per window that a median of 0 hides
             # a policy which loses the whole book several times over a long run.
             "wipeout_rate": f"{np.mean([r['wipeouts'] > 0 for r in res]):.0%}",
+            # The one that matters: a collapse of a real book, not of the single
+            # starter seat every policy holds in its first weeks.
+            "collapse_rate": f"{np.mean([r['worst_wipe'] >= 5 for r in res]):.0%}",
+            "collapse_pct": round(100 * float(np.mean([r["worst_wipe"] >= 5
+                                                       for r in res]))),
+            "worst_wipe": int(max(r["worst_wipe"] for r in res)),
             "wipeout_pct": round(100 * float(np.mean([r["wipeouts"] > 0
                                                       for r in res]))),
             "wipeouts": round(float(np.mean([r["wipeouts"] for r in res])), 2),
@@ -1479,6 +1520,7 @@ def main():
             "cash_p10": round(np.percentile(cashes, 10)),
             "cash_median": round(np.median(cashes)),
             "cash_p90": round(np.percentile(cashes, 90)),
+            "drawn_median": round(np.median(drawn)),
             "equity_median": round(np.median(equities)),
             "net_p10": round(np.percentile(nets, 10)),
             "net_median": round(np.median(nets)),
@@ -1492,9 +1534,9 @@ def main():
 
     RB = pd.DataFrame([{"policy": label, **score(c, h)}
                        for label, c, h in POLICIES])
-    cols = ["policy", "withdraw", "below_water", "worst", "wipeout_rate", "ruin_rate",
-            "blowups", "cash_median", "equity_median", "net_p10", "net_median",
-            "seats_median"]
+    cols = ["policy", "withdraw", "below_water", "worst", "collapse_rate",
+            "worst_wipe", "wipeout_rate", "ruin_rate", "blowups", "drawn_median",
+            "cash_median", "equity_median", "net_p10", "net_median", "seats_median"]
     print(RB[cols].to_string(index=False))
     print("\n  cash_* is REALIZED, withdrawn money. equity_median is still sitting in")
     print("  live accounts and can be lost — do not add the two and call it profit.")
@@ -1503,7 +1545,7 @@ def main():
     print("  once; wipeouts is the mean count. blowups is the median seats liquidated.")
 
     BOOT = RB[RB["policy"] != "subscription"].copy()
-    BOOT["_wr"] = BOOT["wipeout_rate"].str.rstrip("%").astype(float)
+    BOOT["_wr"] = BOOT["collapse_rate"].str.rstrip("%").astype(float)
     best = BOOT.loc[BOOT["cash_median"].idxmax()]
     # Rank the survivable policies on net, not on realized cash: a policy that
     # banks less but keeps far more equity alive is not worse, and cash alone is
@@ -1512,8 +1554,9 @@ def main():
     floor_wr = BOOT["_wr"].min()
     cand = BOOT[BOOT["_wr"] == floor_wr]
     safest = cand.loc[cand["net_median"].idxmax()]
-    safe_label = ("best net, never wiped out" if floor_wr == 0 else
-                  f"best net at the lowest wipeout rate seen ({safest['wipeout_rate']})")
+    safe_label = ("best net, never lost a book" if floor_wr == 0 else
+                  f"best net at the lowest collapse rate seen "
+                  f"({safest['collapse_rate']})")
     sub = RB[RB["policy"] == "subscription"].iloc[0]
     print(f"\n  MODE 1 subscription      spent ${sub['spent']:,.0f}, "
           f"equity ${sub['equity_median']:,.0f}, net ${sub['net_median']:,.0f} "
@@ -1588,7 +1631,7 @@ def main():
         s = b["series"]
         ds = thin(s.groupby(s["day"].dt.date).last().reset_index(drop=True), 700)
         ycum = s.assign(y=s["day"].dt.year).groupby("y")["withdrawn"].last()
-        yr = (ycum.diff().fillna(ycum.iloc[0]) * a.split).round()
+        yr = ycum.diff().fillna(ycum.iloc[0]).round()   # already net of split
         groups: dict[int, list] = {}
         for seat in b["seats"]:
             groups.setdefault(seat["i0"], []).append(seat)
@@ -1662,7 +1705,7 @@ def main():
             s = b["series"]
             ds = thin(s.groupby(s["day"].dt.date).last().reset_index(drop=True), 420)
             ycum = s.assign(y=s["day"].dt.year).groupby("y")["withdrawn"].last()
-            yr = (ycum.diff().fillna(ycum.iloc[0]) * a.split).round()
+            yr = ycum.diff().fillna(ycum.iloc[0]).round()   # already net of split
             groups: dict[int, list] = {}
             for seat in b["seats"]:
                 groups.setdefault(seat["i0"], []).append(seat)
@@ -1702,12 +1745,12 @@ def main():
                 rows.append({"ck": ck, "st": st_,
                              "rate": round(100 * ck / st_), **stats})
         G = pd.DataFrame(rows)
-        best_cell = G.loc[G[G["wipeout_pct"] == 0]["net_median"].idxmax()] \
-            if (G["wipeout_pct"] == 0).any() else G.loc[G["net_median"].idxmax()]
-        print(G[["ck", "st", "rate", "wipeout_pct", "blowups", "cash_median",
-                 "equity_median", "net_p10", "net_median",
+        best_cell = G.loc[G[G["collapse_pct"] == 0]["net_median"].idxmax()] \
+            if (G["collapse_pct"] == 0).any() else G.loc[G["net_median"].idxmax()]
+        print(G[["ck", "st", "rate", "collapse_pct", "worst_wipe", "blowups",
+                 "cash_median", "equity_median", "net_p10", "net_median",
                  "seats_median"]].to_string(index=False))
-        print(f"\n  best net with no wipeout in any window: ${best_cell['ck']:,.0f} "
+        print(f"\n  best net that never lost a book: ${best_cell['ck']:,.0f} "
               f"per ${best_cell['st']:,.0f} ({best_cell['rate']:.0f}%) -> "
               f"net ${best_cell['net_median']:,.0f}, "
               f"cash ${best_cell['cash_median']:,.0f}")
@@ -1732,11 +1775,11 @@ def main():
             "def_ck": int(best_cell["ck"]), "def_st": int(best_cell["st"]),
             "cells": cells, "rows": rows,
             "heat": {"net": matrix("net_median"), "cash": matrix("cash_median"),
-                     "wipe": matrix("wipeout_pct"), "blow": matrix("blowups"),
+                     "wipe": matrix("collapse_pct"), "blow": matrix("blowups"),
                      "seats": matrix("seats_median")},
             "txt": {"net": texts("net_median", "{:,.0f}"),
                     "cash": texts("cash_median", "{:,.0f}"),
-                    "wipe": texts("wipeout_pct", "{:.0f}%"),
+                    "wipe": texts("collapse_pct", "{:.0f}%"),
                     "blow": texts("blowups", "{:.0f}"),
                     "seats": texts("seats_median", "{:.0f}")},
         })
@@ -1748,7 +1791,7 @@ def main():
     def bar_colour(r):
         if r["policy"] == "subscription":
             return "#6b7280"
-        return "#59a14f" if r["wipeout_rate"] == "0%" else "#e15759"
+        return "#59a14f" if r["collapse_rate"] == "0%" else "#e15759"
 
     RBi = RB.set_index("policy")
     books, default_i = [], 0
@@ -1794,7 +1837,7 @@ def main():
         return {"want": want, "policy": short(r["policy"]),
                 "why": fmt.format(**r), "_p": r["policy"]}
 
-    clean = RB["wipeout_rate"] == "0%"
+    clean = RB["collapse_rate"] == "0%"
     is_boot = RB["policy"] != "subscription"
     PICKS = [p for p in (
         pick(clean & is_boot, "net_median",
@@ -1831,11 +1874,11 @@ def main():
              f"all unrealized · ${sub['spent']:,.0f} own capital · "
              f"{sub['blowups']} blowups"],
             ["mode 2 · best cash, any risk", f"${best['cash_median']:,.0f}",
-             "bad" if best["wipeout_rate"] != "0%" else "ok",
-             f"{best['policy'].replace('bootstrap · ', '')} · wiped out in "
-             f"{best['wipeout_rate']} of windows · ruin {best['ruin_rate']}"],
+             "bad" if best["collapse_rate"] != "0%" else "ok",
+             f"{best['policy'].replace('bootstrap · ', '')} · lost a book of "
+             f"{best['worst_wipe']} seats in {best['collapse_rate']} of windows"],
             [f"mode 2 · {safe_label}", f"${safest['net_median']:,.0f}",
-             "ok" if safest["wipeout_rate"] == "0%" else "bad",
+             "ok" if safest["collapse_rate"] == "0%" else "bad",
              f"{boot_pl['name']} · ${safest['cash_median']:,.0f} realized · "
              f"{safest['blowups']} blowups"],
             ["seat cap", str(cfg.seats), "", "firm rule, not a maths question"],

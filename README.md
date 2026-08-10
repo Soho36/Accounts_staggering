@@ -63,8 +63,11 @@ could raise the pre-freeze floor above +$100, which no firm actually does.
 
 `--intratrade-path` survives, because the order of MAE and MFE inside a trade is the one
 thing the sweep genuinely cannot tell us. `mae-first` is the default (it reproduced MT5's
-equity drawdown exactly); `mfe-first` is the optimistic case, since lifting the floor
-before the dip can save a seat.
+equity drawdown exactly). **`mfe-first` is the conservative case, not the optimistic one:**
+it lifts the peak — and therefore the floor — before the adverse excursion is tested
+against it, so the floor is always at least as high and liquidation always at least as
+likely. A higher floor is less cushion, never more. On this data the two orderings give
+almost identical results (87.5% vs 87.3% freeze rate, identical book outcomes).
 
 Commission is hardcoded at **$1.05 round turn** (`COMMISSION_ROUNDTURN`) — it is the
 broker's real figure, not a tuning knob. The seventh column in the sweep exports is *not*
@@ -187,27 +190,29 @@ withdrawal policy is what synchronises a book.
 
 That is visible in the numbers. Buying one seat at a time is *not* sufficient on its own:
 
-| policy | windows with a wipeout | blowups | cash median | net median |
-|---|---|---|---|---|
-| all-in, strip to net | **50%** | 20 | $110,698 | $149,225 |
-| 1/interval, strip to net | **33%** | 10 | $35,080 | $47,434 |
-| 1/interval, keep $4,000 | 11% | 4 | $18,142 | $45,306 |
-| 1/interval, **$200 per $400** (50%) | **0%** | 7 | $22,000 | **$69,610** |
-| 1/interval, $200 per $600 (33%) | **0%** | 6 | $12,900 | $67,376 |
-| 1/interval, $200 per $1,000 (20%) | **0%** | 5 | $5,600 | $58,693 |
-| 1/interval, $200 per $2,000 (10%) | **0%** | 3 | $1,200 | $54,754 |
-| 1/interval, $1,000 per $2,000 (50%) | **0%** | 3 | $15,400 | $65,976 |
-| 1/interval, $500 per $2,500 (20%) | **0%** | 3 | $3,200 | $53,076 |
-| 1/interval, $1,000 per $5,000 (20%) | **0%** | 3 | $2,700 | $46,331 |
-| 1/interval, $400 per $400 (100%) | 17% | 10 | $32,100 | $45,645 |
-| 1/interval, never withdraw | 0% | 0 | $0 | $38,282 |
-| subscription (mode 1) | 0% | 5 | $0 | $66,283 |
+"Collapse" below means a window in which a book of **5 or more** seats was lost at once.
+Counting *any* drop to zero seats conflates that with the single starter seat dying in the
+first weeks, which nearly every policy does once and which is not the same event.
+
+| policy | collapse rate | biggest book lost | blowups | cash in hand | net median |
+|---|---|---|---|---|---|
+| all-in, strip to net | **50%** | **20** | 20 | $113,462 | $147,894 |
+| 1/interval, strip to net | **28%** | **19** | 10 | $35,345 | $46,189 |
+| 1/interval, keep $4,000 | 0% | 1 | 4 | $18,743 | $47,301 |
+| 1/interval, **$200 per $400** (50%) | **0%** | 1 | 7 | $21,900 | **$68,351** |
+| 1/interval, $200 per $600 (33%) | **0%** | 1 | 6 | $12,900 | $66,332 |
+| 1/interval, $1,000 per $2,000 (50%) | **0%** | 1 | 4 | $15,000 | $65,932 |
+| 1/interval, $200 per $1,000 (20%) | **0%** | 1 | 6 | $5,700 | $58,940 |
+| 1/interval, $200 per $2,000 (10%) | **0%** | 1 | 4 | $1,100 | $53,770 |
+| 1/interval, $1,000 per $5,000 (20%) | **0%** | 1 | 4 | $2,700 | $45,476 |
+| 1/interval, never withdraw | 0% | 1 | 0 | $0 | $36,969 |
+| subscription (mode 1) | 0% | 1 | 5 | $0 | $66,548 |
 
 **The ratchet is the fix.** Withdrawing a *share of gains* rather than stripping to a
-level took the wipeout rate to zero at every rate tested, because no seat is ever reset
-to a common equity and the book keeps its dispersion. Withdrawing $200 per $400 gained
-also beats strip-to-net on **net** ($69,610 vs $47,434) despite banking less cash,
-because far more equity survives.
+level never lost a book of more than **one** seat, at any rate tested, because no seat is
+ever reset to a common equity and the book keeps its dispersion. The level policies lost
+books of **19 and 20**. Withdrawing $200 per $400 gained also beats strip-to-net on **net**
+($68,351 vs $46,189) despite banking less cash, because far more equity survives.
 
 **Chunk size matters on its own, not just the rate.** At an identical 20%, taking $200
 per $1,000 nets $58,693 while taking $1,000 per $5,000 nets $46,331 — bigger, rarer
@@ -236,23 +241,17 @@ Over the single full 6.5-year run, all-in strip-to-net banks $557,843 of cash an
 with almost no equity — which looks like the winner, since it is all money in hand. It is
 not:
 
-| over one full 6.5y path | own money in | cash out | equity | **net** | blowups | wipeouts |
-|---|---|---|---|---|---|---|
-| subscription | $5,000 | $0 | $564,063 | **$559,063** | 5 | 0 |
-| all-in, strip to net | $1,200 | $557,843 | $9,355 | **$535,198** | 140 | 7 |
-| $200 per $400 | $1,200 | $242,000 | $261,599 | **$496,599** | 15 | 0 |
-
-Even on the path that flatters it, all-in nets *less* than the subscription. It bought 160
+Even on the path that flatters it, all-in nets *less* than the subscription: it bought 160
 seats and liquidated 140 of them to get there.
 
 And that single path is the survivor. Across all 18 windows:
 
-| | ended below what you put in | worst window | wipeout rate | net p10 | net median |
+| | ended below what you put in | worst window | collapse rate | net p10 | net median |
 |---|---|---|---|---|---|
-| subscription | **0%** | +$2,009 | 0% | $36,734 | $66,283 |
-| all-in, strip to net | **22%** | **−$4,804** | 50% | **−$1,200** | $148,025 |
-| 1/interval, strip to net | 0% | +$3,478 | 33% | $8,302 | $46,234 |
-| $200 per $400 | 6% | −$13 | **0%** | $5,043 | **$68,410** |
+| subscription | **0%** | +$2,181 | 0% | $33,577 | $66,548 |
+| all-in, strip to net | **17%** | **−$1,200** | 50% | **−$1,061** | $147,894 |
+| 1/interval, strip to net | 0% | +$3,667 | 28% | $8,336 | $46,189 |
+| $200 per $400 | 6% | −$250 | **0%** | $4,859 | **$68,351** |
 
 All-in does have the highest median net, by a wide margin — that part is real. But it ends
 **below the money you put in 22% of the time**, its p10 is losing the entire seed, and it
@@ -279,6 +278,20 @@ cash to replace one. A book that goes to zero seats and immediately rebuys is no
 "ruined" by that definition. Read the **windows with a wipeout** column first — and note
 it is a *rate*, not a median, because a median of 0 concealed a policy that wiped out six
 times over the full run.
+
+### Metric definitions, because two of them were wrong once
+
+- **cash in hand** is the pot *balance* at the end — what is left after seats were rebought
+  out of it — and it is already net of `--split`. **total withdrawn** is the gross amount
+  ever taken out of accounts, which is larger. Both are reported; an earlier version
+  labelled the balance as "realized cash withdrawn", which conflated them.
+- **net** = cash in hand + equity (split-adjusted) − own capital, where own capital is the
+  seed for the bootstrap and cumulative `spent` for the subscription. It is the only
+  measure the two funding modes can share.
+- **collapse rate** is the share of windows that lost a book of **5 or more** seats at
+  once. **windows that hit zero seats** is the looser version and is close to useless on
+  its own: almost every policy loses its single starter seat once, which is not a
+  catastrophe. Read the collapse rate and the biggest-book-lost column together.
 
 ### Read these caveats before trusting any of it
 
@@ -333,7 +346,9 @@ The book:
 - `--withdraw-chunk N` / `--withdraw-step N` — the ratchet. One chunk withdrawn per
   `step` of lifetime gain, so `chunk/step` is the withdrawal rate (200/1000 = 20%)
 - `--no-explore` — skip `bootstrap_explorer.html`, which is most of the run time
-- `--split N` — trader's share of profit (real plans are 0.8–0.9)
+- `--split N` — trader's share of a payout (real plans are 0.8–0.9). Applied **when the
+  money arrives**, so at 80% only 80% ever reaches the pot and only 80% is available to
+  buy the next seat
 - `--horizon N` — years per book window in the robustness sweep
 
 ## Output
