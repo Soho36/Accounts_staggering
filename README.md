@@ -86,17 +86,20 @@ seat, $1.05 round turn, a new seat every 30 days.
   Withdrawing a share of gains earns more *net* with no wipeouts at all. See below.
 - **Never withdrawing earns nothing withdrawable**, no matter how well it trades — under
   bootstrap funding it can never afford a second seat (median 6 seats, $0 cash).
-- **Per seat-year ≈ $4,780** on the illustrative book (160 seats, 118.7 seat-years,
-  $567k of banked cash plus surviving equity), against ≈ $778 for the per-window
-  RR-tuned allocation this project split off from — that second figure comes from the
-  source project and has not been re-derived here. Tuning risk down per account cost
-  roughly 5× in exposure; the binding constraint is how many seats you may run.
+- **Per seat-year, measured per start date: median $622, mean $1,513** (starts with a full
+  year of runway). This is the policy-independent version and the one to quote.
 
-  This is a **book-level** figure, and it is policy-dependent: measured per individual
-  start date instead, a seat returns a median of $621 and a mean of $1,513 per year of
-  runway. The gap is the survivorship the book gets from replacing dead seats. Earlier
-  notes quoted $3,850 per seat-year without saying which denominator that was; use the
-  numbers above and state the denominator.
+  Do **not** quote a book-level seat-year figure. It is not a property of the strategy, it
+  is a property of whichever policy you featured: the all-in book gives $4,780/seat-year
+  (160 seats over 118.7 seat-years) and the `$200 per $400` book gives $21,890 (35 seats
+  over 23.0 seat-years) on the *same data*, because a policy that keeps its seats alive
+  concentrates the same profit into far fewer seat-years. Earlier notes here quoted $3,850
+  and then $4,780 without stating the denominator; both were book-level and neither is
+  comparable to anything.
+
+  For context, the per-window RR-tuned allocation this project split off from returned
+  ≈ $778 per seat-year — that figure comes from the source project and has not been
+  re-derived here.
 
 ## The two modes
 
@@ -237,39 +240,45 @@ One path each, not an expectation.
 
 ### The all-in book looks best on one path and is the worst bet on the distribution
 
-Over the single full 6.5-year run, all-in strip-to-net banks $557,843 of cash and ends
-with almost no equity — which looks like the winner, since it is all money in hand. It is
-not:
+Over the single full 6.5-year run, all-in strip-to-net withdraws $560,428 and ends with
+almost no equity — which looks like the winner, since it is all money in hand. On the same
+path it still nets **less** than the subscription, having bought 160 seats and liquidated
+140 of them to get there:
 
-Even on the path that flatters it, all-in nets *less* than the subscription: it bought 160
-seats and liquidated 140 of them to get there.
+| one full 6.5y path | own money in | cash out | equity left | **net** | blowups | collapses |
+|---|---|---|---|---|---|---|
+| subscription | $5,200 | $0 | $559,162 | **$553,962** | 6 | 0 |
+| all-in, strip to net | $1,200 | $560,428 | $9,355 | **$537,783** | 140 | 7 |
+| 1/interval, strip to net | $1,200 | $270,204 | −$64 | $258,739 | 56 | 7 |
+| $200 per $400 | $1,200 | $242,600 | $260,931 | **$496,531** | 15 | 0 |
 
-And that single path is the survivor. Across all 18 windows:
+And that single path is the survivor — the run where it happened to work. Across all 18
+windows:
 
 | | ended below what you put in | worst window | collapse rate | net p10 | net median |
 |---|---|---|---|---|---|
 | subscription | **0%** | +$2,181 | 0% | $33,577 | $66,548 |
-| all-in, strip to net | **17%** | **−$1,200** | 50% | **−$1,061** | $147,894 |
+| all-in, strip to net | **17%** | **−$1,200** | **50%** | **−$1,061** | $147,894 |
 | 1/interval, strip to net | 0% | +$3,667 | 28% | $8,336 | $46,189 |
 | $200 per $400 | 6% | −$250 | **0%** | $4,859 | **$68,351** |
 
 All-in does have the highest median net, by a wide margin — that part is real. But it ends
-**below the money you put in 22% of the time**, its p10 is losing the entire seed, and it
-loses the whole book at least once in half of all windows. It is the highest-median and the
-only losing bet in the table.
+**below the money you put in 17% of the time**, its p10 is losing the seed outright, and it
+loses a book of 20 seats in half of all windows. It is simultaneously the highest-median
+and the only losing bet in the table.
 
 | | Mode 1 subscription | Mode 2, $200 per $400 |
 |---|---|---|
-| own capital in | $5,000 | $1,200 seed |
-| seats bought | 25, on 25 distinct dates | 35, on 35 distinct dates |
-| blowups / wipeouts | 5 / 0 | 15 / 0 |
+| own capital in | $5,200, paid $200 at a time | $1,200 seed, paid once |
+| seats bought | 26 | 35 |
+| blowups / collapses | 6 / 0 | 15 / 0 |
 | alive at end | 20 | 20 |
-| cash withdrawn | $0 | $242,000 |
-| equity left | $564,063 | $261,599 |
-| **net** | **$559,063** | **$496,599** |
+| cash withdrawn | $0 | $242,600 |
+| equity left | $559,162 | $260,931 |
+| **net** | **$553,962** | **$496,531** |
 
-The bootstrap reaches 89% of the subscription's net on a quarter of the capital, and
-roughly half of it is already banked rather than sitting inside prop accounts. Everything
+The bootstrap reaches 90% of the subscription's net on under a quarter of the capital, and
+roughly half of it is already in hand rather than sitting inside prop accounts. Everything
 in the subscription column is unrealized: a seat that has never withdrawn has never
 returned a cent.
 

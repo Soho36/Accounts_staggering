@@ -301,7 +301,8 @@ def build_stream(a) -> dict:
     rows = []
     for t, m in zip(parts, keep):
         for i in np.flatnonzero(m):
-            rows.append((t["ex"][i], t["net"][i], t["mae"][i], t["mfe"][i]))
+            rows.append((t["ex"][i], t["net"][i], t["mae"][i], t["mfe"][i],
+                         t["en"][i]))
     rows.sort(key=lambda r: r[0])
 
     ex = np.array([r[0] for r in rows])
@@ -318,6 +319,10 @@ def build_stream(a) -> dict:
         "net": np.array([r[1] for r in rows])[mask],
         "mae": np.array([r[2] for r in rows])[mask],
         "mfe": np.array([r[3] for r in rows])[mask],
+        # Entry times survive the replay so the single-seat study can ask "which
+        # trades could an account opened on day D actually have held?". After the
+        # one-position replay nothing overlaps, so this array is sorted.
+        "en": np.array([r[4] for r in rows])[mask],
         "windows": kept, "blown": blown, "unknown": unknown,
         "offered": sum(len(p["en"]) for p in parts),
         "taken": sum(int(m.sum()) for m in keep),
@@ -522,13 +527,17 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
 
         if cfg.funding == "cash" and not live and cash < rule.cost:
             ruined = True                              # absorbing state
-        equity = sum(a["eq"] for a in live)
+        # Equity is unrealized, so it would still be split on the way out. Cash
+        # was already split when it arrived; charging it twice would be wrong,
+        # and leaving equity gross would quietly mix a pre-split number with a
+        # post-split one in the same total.
+        equity = sum(a["eq"] for a in live) * cfg.split
         series.append((day, len(live), withdrawn, cash, equity, spent,
                        cash + equity - cfg.seed - spent))
 
     S = pd.DataFrame(series, columns=["day", "live", "withdrawn", "cash",
                                       "equity", "spent", "wealth"])
-    equity = sum(a["eq"] for a in live)
+    equity = sum(a["eq"] for a in live) * cfg.split
     return {"series": S, "bought": bought, "deaths": deaths, "cash": cash,
             "equity": equity, "withdrawn": withdrawn, "spent": spent,
             "live": len(live), "ruined": ruined, "seats": done + live,
@@ -663,8 +672,10 @@ seat at a time, and withdraw a share of gains instead of stripping to a level.</
 
 <h2>5 &middot; Both modes, across every window</h2>
 <div class="panel"><div id="c_keep" style="height:560px"></div>
- <div class="note">Median realized cash across every __NWIN__ overlapping __HZV__-year
- window; whiskers are p10 to p90. Read the whisker, not the bar &mdash; the spread is wider
+ <div class="note">Median cash <b>in hand</b> &mdash; the pot balance at the end, after
+ seats were rebought out of it, and already net of the profit split. The gross amount
+ ever withdrawn is larger and is its own column in the table. Across every __NWIN__
+ overlapping __HZV__-year window; whiskers are p10 to p90. Read the whisker, not the bar &mdash; the spread is wider
  than the difference between most policies. The subscription bar is zero by construction:
  it never withdraws, so all of its value sits in the equity column of the table instead.</div></div>
 <div class="panel"><div id="c_vs" style="height:400px"></div>
@@ -712,7 +723,9 @@ kept working, not what happens if it stops.</div>
 
 <h2>8 &middot; Every policy, across all windows</h2>
 <div class="panel" style="overflow:auto" id="t_keep"></div>
-<div class="note">Cash is realized. Equity is still inside live accounts and can be lost
+<div class="note"><b>cash in hand</b> is the pot balance, already net of the split;
+<b>total withdrawn</b> is the gross ever taken out, and the two differ by whatever was
+spent rebuying seats. Equity is still inside live accounts and can be lost
 &mdash; never add the two together and call it profit. <b>net</b> = cash + equity &minus;
 own capital spent, which is the only column the two modes can be compared on.
 <b>blowups</b> is the median number of seats liquidated per window.</div>
@@ -831,9 +844,9 @@ Plotly.newPlot('c_keep',[{
  customdata:D.keep.sub,
  hovertemplate:'%{y}<br>median $%{x:,.0f}<br>%{customdata}<extra></extra>'}],
  Object.assign({margin:{l:290,r:20,t:28,b:40},font:F,
-  title:{text:'Realized cash over a fixed window - median, with p10 to p90',
+  title:{text:'Cash in hand at the end of a window - median, with p10 to p90',
    x:0,font:{size:13}},
-  xaxis:{title:'cash withdrawn $',gridcolor:'#eef0f3'},
+  xaxis:{title:'cash in hand $',gridcolor:'#eef0f3'},
   yaxis:{automargin:true,autorange:'reversed'}},BG),CFG);
 // ---- policy switcher: one full-period run is stored per policy -------------
 const money=v=>(v<0?'-$':'$')+Math.abs(Math.round(v)).toLocaleString();
@@ -1385,8 +1398,15 @@ def main():
           f"{a.intratrade_path}")
 
     # ---- one seat, from every possible start date ---------------------------
-    days = pd.to_datetime(ex).normalize()
-    first_i = pd.Series(range(len(ex))).groupby(days).min().sort_index()
+    # An account opened on day D cannot have been holding a position that was
+    # already open, so it starts at the first trade ENTERED on or after D - not
+    # at the first trade that happens to exit that day. The book engine follows
+    # the same rule.
+    en = pd.to_datetime(st["en"])
+    cand = pd.Series(pd.to_datetime(ex).normalize()).drop_duplicates().sort_values()
+    first_i = pd.Series(
+        {d: int(np.searchsorted(en.values, np.datetime64(d))) for d in cand})
+    first_i = first_i[first_i < len(net)]
     last_day = pd.Timestamp(ex[-1])
     out = []
     for d, i0 in first_i.items():
@@ -1491,8 +1511,8 @@ def main():
         # different and larger number; both are reported rather than conflated.
         cashes = np.array([r["cash"] for r in res])
         drawn = np.array([r["withdrawn"] for r in res])
-        # Equity is unrealized and would still be split on the way out.
-        equities = np.array([r["equity"] for r in res]) * c.split
+        # run_book already splits equity, so do not charge it a second time.
+        equities = np.array([r["equity"] for r in res])
         # Net has to charge every dollar of the trader's own money, whichever way
         # it went in: `spent` for the subscription, which pays per seat forever,
         # and the seed for the bootstrap, which pays once up front. Leaving the
@@ -1538,8 +1558,10 @@ def main():
             "worst_wipe", "wipeout_rate", "ruin_rate", "blowups", "drawn_median",
             "cash_median", "equity_median", "net_p10", "net_median", "seats_median"]
     print(RB[cols].to_string(index=False))
-    print("\n  cash_* is REALIZED, withdrawn money. equity_median is still sitting in")
-    print("  live accounts and can be lost — do not add the two and call it profit.")
+    print("\n  cash_median is the pot BALANCE at the end, net of the split, after seats")
+    print("  were rebought out of it; drawn_median is the GROSS ever withdrawn.")
+    print("  equity_median is still inside live accounts and can be lost — do not add")
+    print("  it to cash and call the total profit.")
     print("  net_* = cash + equity - capital spent, so the subscription is comparable.")
     print("  wipeout_rate is the share of windows that lost the whole book at least")
     print("  once; wipeouts is the mean count. blowups is the median seats liquidated.")
@@ -1562,12 +1584,13 @@ def main():
           f"equity ${sub['equity_median']:,.0f}, net ${sub['net_median']:,.0f} "
           f"median, {sub['blowups']} blowups, wipeouts in {sub['wipeout_rate']} "
           f"of windows")
-    print(f"  MODE 2 best cash         {best['policy']} -> "
-          f"${best['cash_median']:,.0f} cash, ruin {best['ruin_rate']}, "
-          f"wipeouts in {best['wipeout_rate']} of windows")
+    print(f"  MODE 2 best cash in hand {best['policy']} -> "
+          f"${best['cash_median']:,.0f} in hand (${best['drawn_median']:,.0f} gross "
+          f"withdrawn), lost a {best['worst_wipe']}-seat book in "
+          f"{best['collapse_rate']} of windows")
     print(f"  MODE 2 {safe_label}  {safest['policy']} -> "
-          f"net ${safest['net_median']:,.0f} (${safest['cash_median']:,.0f} of it "
-          f"realized), ruin {safest['ruin_rate']}, {safest['blowups']} blowups")
+          f"net ${safest['net_median']:,.0f} (${safest['cash_median']:,.0f} of it in "
+          f"hand), ruin {safest['ruin_rate']}, {safest['blowups']} blowups")
 
     RESULTS.mkdir(exist_ok=True)
     S.to_csv(RESULTS / "farming_starts.csv", index=False)
@@ -1842,12 +1865,12 @@ def main():
     PICKS = [p for p in (
         pick(clean & is_boot, "net_median",
              "never losing the whole book, best overall",
-             None, "net ${net_median:,.0f} median · ${cash_median:,.0f} of it banked "
+             None, "net ${net_median:,.0f} median · ${cash_median:,.0f} of it in hand "
                    "· p10 ${net_p10:,.0f} · {blowups} blowups"),
         pick(clean & is_boot, "cash_median",
              "cash in hand rather than equity at risk",
-             None, "${cash_median:,.0f} banked · net ${net_median:,.0f} · "
-                   "p10 ${net_p10:,.0f}"),
+             None, "${cash_median:,.0f} in hand of ${drawn_median:,.0f} ever "
+                   "withdrawn · net ${net_median:,.0f} · p10 ${net_p10:,.0f}"),
         pick(is_boot, "net_p10", "the best bad case, whatever the upside",
              None, "p10 ${net_p10:,.0f} · net ${net_median:,.0f} median · "
                    "wipeouts in {wipeout_rate} of windows"),
@@ -1873,13 +1896,13 @@ def main():
             ["mode 1 · net", f"${sub['net_median']:,.0f}", "",
              f"all unrealized · ${sub['spent']:,.0f} own capital · "
              f"{sub['blowups']} blowups"],
-            ["mode 2 · best cash, any risk", f"${best['cash_median']:,.0f}",
+            ["mode 2 · most cash in hand, any risk", f"${best['cash_median']:,.0f}",
              "bad" if best["collapse_rate"] != "0%" else "ok",
              f"{best['policy'].replace('bootstrap · ', '')} · lost a book of "
              f"{best['worst_wipe']} seats in {best['collapse_rate']} of windows"],
             [f"mode 2 · {safe_label}", f"${safest['net_median']:,.0f}",
              "ok" if safest["collapse_rate"] == "0%" else "bad",
-             f"{boot_pl['name']} · ${safest['cash_median']:,.0f} realized · "
+             f"{boot_pl['name']} · ${safest['cash_median']:,.0f} in hand · "
              f"{safest['blowups']} blowups"],
             ["seat cap", str(cfg.seats), "", "firm rule, not a maths question"],
         ],
