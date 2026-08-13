@@ -15,15 +15,10 @@ rule = af.Rule(dd=2500.0, frozen_floor=100.0, cost=200.0, mfe_first=False)
 SEED = 1200.0
 base = dict(seats=20, interval_days=30, policy="time")
 
-horizon = pd.Timedelta(days=int(365.25 * 2.0))
-day_arr = pd.to_datetime(ex)
-Q = []
-for d in pd.date_range(day_arr[0].normalize(), day_arr[-1], freq="QS"):
-    if d + horizon > day_arr[-1]:
-        break
-    j = int(np.searchsorted(day_arr, d)); k = int(np.searchsorted(day_arr, d + horizon))
-    if k - j > 200:
-        Q.append((j, k))
+# Each robustness window must resolve its own one-position competition from a
+# flat boundary. Slicing the all-history replay inherits blocking decisions made
+# by positions that did not exist in the new book.
+Q = af.robustness_periods(st, 2.0, min_trades=200)
 
 POL = {
  "all-in, strip to net": (af.BookCfg(**base, seed=SEED, max_per_event=20,
@@ -50,8 +45,8 @@ print(f"{'policy':<26}{'balance med':>13}{'withdrawn med':>15}{'diff':>11}"
       f"{'seats':>7}")
 rank_bal, rank_wd = {}, {}
 for name, (cfg, h) in POL.items():
-    res = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, cfg)
-           for j, k in Q]
+    res = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], h, rule, cfg)
+           for _, p in Q]
     bal = np.median([r["cash"] for r in res])
     wd = np.median([r["withdrawn"] for r in res])
     rank_bal[name], rank_wd[name] = bal, wd
@@ -125,10 +120,10 @@ def run_book_nolook(ex, net, mae, mfe, h, rule, cfg):
 
 print(f"{'policy':<26}{'net NOW':>12}{'net FIXED':>12}{'diff':>10}{'diff %':>9}")
 for name, (cfg, h) in POL.items():
-    n1 = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, cfg)
-          for j, k in Q]
-    n2 = [run_book_nolook(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, cfg)
-          for j, k in Q]
+    n1 = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], h, rule, cfg)
+          for _, p in Q]
+    n2 = [run_book_nolook(p["ex"], p["net"], p["mae"], p["mfe"], h, rule, cfg)
+          for _, p in Q]
     a1 = np.median([r["cash"] + r["equity"] - cfg.seed for r in n1])
     a2 = np.median([r["cash"] + r["equity"] - cfg.seed for r in n2])
     print(f"{name:<26}{a1:>12,.0f}{a2:>12,.0f}{a2-a1:>10,.0f}"

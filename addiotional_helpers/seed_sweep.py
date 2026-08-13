@@ -14,15 +14,7 @@ ex, net, mae, mfe = st["ex"], st["net"], st["mae"], st["mfe"]
 rule = af.Rule(dd=2500.0, frozen_floor=100.0, cost=200.0, mfe_first=False)
 
 # same quarterly 2-year windows the report uses
-horizon = pd.Timedelta(days=int(365.25 * 2.0))
-day_arr = pd.to_datetime(ex)
-q = []
-for d in pd.date_range(day_arr[0].normalize(), day_arr[-1], freq="QS"):
-    if d + horizon > day_arr[-1]:
-        break
-    j = int(np.searchsorted(day_arr, d)); k = int(np.searchsorted(day_arr, d + horizon))
-    if k - j > 200:
-        q.append((j, k))
+q = af.robustness_periods(st, 2.0)
 
 print("=== 1. does seed=1 wait, or deadlock? (full 6.5y run) ===")
 for sd in (1.0, 199.0, 200.0):
@@ -41,8 +33,8 @@ for sd in (200, 400, 600, 800, 1000, 1200, 1600, 2000, 3000, 4000):
     cfg = af.BookCfg(seats=20, seed=float(sd), interval_days=30, policy="time",
                      max_per_event=1, funding="cash")
     h = af.Harvest("ratchet", chunk=200.0, step=400.0)
-    res = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, cfg)
-           for j, k in q]
+    res = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], h, rule, cfg)
+           for _, p in q]
     cash = np.array([r["cash"] for r in res])
     eq = np.array([r["equity"] for r in res])
     nets = cash + eq - np.array([r["spent"] for r in res]) - sd

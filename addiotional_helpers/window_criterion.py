@@ -57,14 +57,11 @@ def evaluate(drop, label):
                            start_date="2023-01-01", end_date=None)
     st = af.build_stream(a)
     ex, net, mae, mfe = st["ex"], st["net"], st["mae"], st["mfe"]
-    horizon = pd.Timedelta(days=365)
-    darr = pd.to_datetime(ex); Q = []
-    for d in pd.date_range(darr[0].normalize(), darr[-1], freq="QS"):
-        if d + horizon > darr[-1]: break
-        j = int(np.searchsorted(darr, d)); k = int(np.searchsorted(darr, d + horizon))
-        if k - j > 150: Q.append((j, k))
-    res = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], POL, rule, cfg)
-           for j, k in Q]
+    # Re-resolve entry blocking inside every OOS year. A slice of the replayed
+    # 2023+ stream can otherwise inherit a position opened before that quarter.
+    Q = af.robustness_periods(st, 1.0, min_trades=150)
+    res = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], POL, rule, cfg)
+           for _, p in Q]
     nets = np.array([r["wealth"] for r in res])
     print(f"{label:<40}{len(keep):>4}{len(net):>8,}{net.sum():>10,.0f}"
           f"{af.dd_equity(net,mae,mfe):>9,.0f}"

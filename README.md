@@ -23,8 +23,11 @@ better business than tuning the strategy.
 ## The simulator
 
 ```powershell
-python account_farming.py --dd 2500 --cost 200 --seats 20 --seed 1200
+.\venv\Scripts\python.exe account_farming.py --dd 2500 --cost 200 --seats 20 --seed 1200
 ```
+
+Use the project venv for the helpers as well. The commands in this README use the working
+Windows junction at `I:\PycharmProjects\Accounts_staggering`.
 
 Needs `plotly` for the HTML report (`pip install plotly`); without it the script still
 runs and writes the CSVs, and simply skips the report.
@@ -74,7 +77,49 @@ Commission is hardcoded at **$1.05 round turn** (`COMMISSION_ROUNDTURN`) — it 
 broker's real figure, not a tuning knob. The seventh column in the sweep exports is *not*
 a commission, so it is preserved as `Extra` and ignored.
 
-## ⚠ All figures were restated on 2026-08-13
+## ⚠ Historical figures versus the current decision artifacts
+
+Sections below preserve the investigation history and explain why earlier recommendations
+changed. They contain dated/default-seed examples and should not be treated as the current
+operating table. For current, reproducible decision numbers use:
+
+- `results/allocation_sweep.md` for Mode 2 seed/cadence/DD/cap/withdrawal decisions;
+- `results/schedule_oos.md` for the time-window schedule hypothesis; and
+- `results/farming_withdrawal_policies.csv` for the exact settings shown in the latest HTML.
+
+Those artifacts distinguish realized cash, safely cashable endpoint value, optimistic prop
+mark, 5+ seat shocks, and full-book extinction. Rerun them after any simulator change.
+
+### Current decision summary (2026-08-14)
+
+- Use **Mode 2**, fixed **RR 1.00**, and keep all 23 windows for now. The RR 2.00/2.50
+  comparisons are invalid because `16-17` was tester-truncated. A separate RR per hour has
+  not produced a reliable out-of-sample improvement.
+- Do not turn off hours from this sample. Of eight windows that lost in 2020-2022, only two
+  also lost from 2023 onward. A train-only schedule rule won 3 of 6 rolling test years;
+  its exact paired sign-flip p-value was 0.625. Bad hours exist in hindsight, but this data
+  has not identified them prospectively.
+- A disjoint schedule does remove cross-window blocking, but it also changes contract
+  exposure. With 23 dedicated hourly seats the 2023+ book took only 5.9% as many
+  contract-trades as 23 identical all-window seats. Most of the apparent drawdown reduction
+  is therefore de-levering/time-of-day weighting, not evidence that filtering found alpha.
+- For starts, buy **one seat per event on a fixed calendar**. At the deliberately optimistic
+  100% split, a $3,000 seed and 45-day starts produced cashout median/p10 of $25,018/$287,
+  with 0/18 observed ruin and 0/18 five-seat shocks. At 90% and 80% payout splits its p10
+  became -$81 and -$450. Those are overlapping in-sample windows, so none of these is a
+  claim of safety or a live optimum.
+- A provisional cap of **8-10 live seats** captured nearly all of the 45-day median in this
+  model. Raising the cap to 20 added no typical cashout there. At 30 days it added little
+  median and increased observed liquidation clustering.
+- The risk-first withdrawal diagnostic is the **$200 per $400 gain ratchet**. At $3,000/30d,
+  $200 per $1,000 raised median cashout from $38,769 to $43,669 but lowered p10 from $220
+  to -$2,733 and left much less realized cash. The ratchet remains fitted in-sample.
+- The equal-price mechanism test favored a $2,500 DD, but it is not a tier recommendation.
+  A real choice needs the firm's price, activation/reset/renewal cost, payout split and
+  eligibility rules, contract limit, floor behavior and delays for every tier. The current
+  engine cannot yet compare a mixed-tier book.
+
+### Figures restated on 2026-08-13
 
 Every number in this file before that date was computed on **22 windows instead of 23**.
 `pass_is_blown()` flagged a pass as tester-liquidated when its `equity_dd` reached 95% of
@@ -129,7 +174,9 @@ per seat, $1.05 round turn, a new seat every 30 days.
 
 ## The two modes
 
-The simulator runs both funding models and scores every policy across all windows.
+The simulator runs both funding models and scores every policy across all windows. For
+this project the operating objective is **Mode 2**; Mode 1 is retained only as a diagnostic
+benchmark and is not a recommendation.
 
 **Mode 1 — subscription.** Own money, one seat every `--interval-days`, never withdraw,
 hold forever. Cannot be ruined, because funding is external. It fills to the seat cap and
@@ -148,8 +195,9 @@ The pot starts at `--seed`. A frozen seat pays money *into* it when the withdraw
 fires; buying a seat takes `--cost` *out* of it. Nothing else adds to it.
 
 So both modes spend your own money, and the difference is the schedule: mode 1 pays $200
-forever, on the interval; mode 2 pays once at the start and never again. `net` subtracts
-both (`cash + equity − seed − spent`), which is what makes the two comparable. So **withdrawals are the only thing that funds growth** — which is why
+forever, on the interval; mode 2 pays once at the start and never again. The report now
+keeps three endpoints separate: realized pot cash, cash plus safely withdrawable surplus,
+and an optimistic mark that credits positive P&L in all live prop accounts. So **withdrawals are the only thing that funds growth** — which is why
 "never withdraw" under bootstrap funding is not a strategy but a dead end: at $1,200 seed
 and $200 a seat it buys exactly **6 seats**, one per interval, and then the pot is empty
 permanently. That is the whole explanation for the 6 in the table below.
@@ -330,16 +378,16 @@ times over the full run.
 ### Metric definitions, because two of them were wrong once
 
 - **cash in hand** is the pot *balance* at the end — what is left after seats were rebought
-  out of it — and it is already net of `--split`. **total withdrawn** is the gross amount
-  ever taken out of accounts, which is larger. Both are reported; an earlier version
+  out of it — and it is already net of `--split`. **payout received** is the cumulative
+  post-split amount received; **gross requested** is tracked separately. An earlier version
   labelled the balance as "realized cash withdrawn", which conflated them.
-- **net** = cash in hand + equity (split-adjusted) − own capital, where own capital is the
-  seed for the bootstrap and cumulative `spent` for the subscription. It is the only
-  measure the two funding modes can share.
-- **collapse rate** is the share of windows that lost a book of **5 or more** seats at
-  once. **windows that hit zero seats** is the looser version and is close to useless on
-  its own: almost every policy loses its single starter seat once, which is not a
-  catastrophe. Read the collapse rate and the biggest-book-lost column together.
+- **realized** = pot cash − own capital. **cashout** adds only surplus currently
+  withdrawable above the Safety Net on frozen seats. **mark-to-model** also credits
+  positive P&L in all live accounts, even when not payout-eligible; it is not cash.
+- **5+ seat shock rate** includes any trade liquidating at least five seats, even when
+  other seats survive. **full-collapse rate** is the stricter subset that takes a 5+ seat
+  book to zero. The previous single "collapse" metric only saw full extinction and missed,
+  for example, a 19-of-20 liquidation.
 
 ### Read these caveats before trusting any of it
 
@@ -359,26 +407,27 @@ times over the full run.
 - **One filter bug cost this project two months of wrong numbers.** Anything derived from
   a heuristic over the sweep metadata deserves a sanity check against the raw files.
 
-### RR: not worth optimising, but do avoid the edges
+### RR: keep it simple; two old rows were invalid
 
 Swept over the 23 windows, all in-sample:
 
-| RR | reaches Safety Net | median days | collapse | net median |
+| RR | reaches Safety Net | mean days | 5+ seat shock | optimistic mark median |
 |---|---|---|---|---|
-| 0.50 | 49% | 127 | **28%** | $439 |
-| 0.75 | 67% | 201 | 0% | $36,275 |
-| **1.00** | **76%** | 155 | **0%** | **$62,638** |
-| 1.25 | 73% | 173 | 6% | $42,296 |
-| 1.50 | 62% | 126 | 6% | $24,531 |
-| 2.00 | 78% | 134 | 0% | $43,399 |
-| 2.50 | 79% | 117 | 0% | **$68,545** |
-| 3.00 | 61% | 107 | **11%** | $44,875 |
+| 0.50 | 49% | 127 | 39% | $1,474 |
+| 0.75 | 67% | 201 | 11% | $36,042 |
+| **1.00** | **76%** | 155 | **0%** | **$61,787** |
+| 1.25 | 73% | 173 | 28% | $39,241 |
+| 1.50 | 62% | 126 | 33% | $26,227 |
+| 2.00 | **INVALID** | — | — | tester-truncated `16-17` pass |
+| 2.50 | **INVALID** | — | — | tester-truncated `16-17` pass |
+| 3.00 | 61% | 107 | 22% | $49,175 |
 
-Net median bounces $24k → $68k between neighbouring values with no monotonic structure:
-that is noise, not a surface with an optimum. What *is* robust is that **RR 0.50 is bad**
-(49% freeze, 28% collapse) and days-to-freeze falls as RR rises. RR 1.00 sits mid-plateau
-with a 0% collapse rate; RR 2.50 scores higher on net but that gap is inside the noise.
-Pick a value whose neighbours also work and stop there.
+The former RR 2.00 and 2.50 rows silently used only 22 windows: MT5 liquidated/truncated
+`16-17` in 2022 and `build_stream()` dropped it. Strict mode now rejects those universes.
+Regenerate signal exports with a tester setup that cannot terminate signal generation
+before comparing them. RR 1.00 remains the conservative operational default; per-window
+RR fitting has not shown a reliable out-of-sample gain large enough to justify its extra
+degrees of freedom.
 
 ## Options
 
@@ -389,6 +438,8 @@ Input:
 - `--rr VALUE` — choose the RR file suffix to load, such as `1.00`
 - `--windows 9-10,10-11` — restrict the hourly windows to test
 - `--start-date` / `--end-date` — inclusive `YYYY-MM-DD` filters
+- `--allow-incomplete` — diagnostic escape hatch for missing/truncated MT5 passes. Never
+  use it for an RR or window comparison; strict rejection is the default
 
 Account rule:
 
@@ -426,22 +477,26 @@ Written into `results/`:
 - `farming_withdrawal_policies.csv` — the robustness sweep, both modes
 - `farming_book_seats.csv` — per-seat summary of the illustrative bootstrap book
 - `farming_subscription_seats.csv` — the same for the subscription book
+- `allocation_sweep.csv` / `allocation_sweep.md` — reproducible Mode 2 cadence, seed,
+  withdrawal, DD, cap, trigger, and payout-split diagnostics
+- `schedule_oos.csv` / `schedule_oos.md` / `schedule_oos_rolling_years.csv` — raw
+  train/test and rolling-year diagnostics for the disjoint-window schedule hypothesis
 
 The HTML report has nine sections: whether a seat reaches the Safety Net by start date;
 closed vs floating drawdown; mode 1 with its portfolio curve and per-seat curves; mode 2
 with a **policy switcher** that redraws the book, the seat curves and the yearly cash for
-any policy in the sweep; both modes across every window plus a net-position comparison;
+any policy in the sweep; both modes across every window plus a cashout-position comparison;
 **the decision section**; monthly P&L; the full policy table; and a reconstruction check
 against a real MT5 run.
 
 ### The decision section
 
 This is the part that answers "which one do I pick". It plots every policy as typical
-outcome (net median) against bad case (net p10). A policy with another one above **and**
-to the right of it is **dominated** — strictly worse on both counts, so no risk appetite
-would ever choose it. Those are drawn hollow and unlabelled; what remains is the frontier,
-where more typical outcome costs you downside. Marker outlines are green if the policy
-never lost the whole book in any window, red if it did.
+cashout (median) against bad-case cashout (p10). A policy with another one above **and**
+to the right is dominated on those two axes; it can still differ in realized cash, ruin,
+or liquidation shocks. Dominated-on-cashout points are drawn hollow and unlabelled; what
+remains is that two-axis frontier. Risk is reported separately as same-trade death shocks,
+whole-book extinction, and terminal ruin.
 
 Underneath is a table of "if what you care about is X, then take Y", computed from the
 sweep rather than asserted — one row per constraint someone might actually have (never
@@ -459,10 +514,10 @@ which just duplicates the diagonal).
 
 Picking a combination redraws the book, the per-seat curves and the yearly cash for a full
 6.5-year run of that exact rule, with a stat strip of its medians across all 18 windows.
-Below is a heatmap of the whole grid with a metric switcher — net, cash, wipeout rate,
+Below is a heatmap of the whole grid with a metric switcher — cashout, pot cash, 5+ shock rate,
 blowups, seats bought — and every cell and table row is clickable to load it above. A
-warning banner appears automatically for any rule that ever lost the whole book, and for
-any rule that banks nothing and therefore stalls at 6 seats.
+warning banner appears automatically for any rule with a five-or-more-seat same-trade
+liquidation shock, and for any rule that banks nothing and therefore stalls at 6 seats.
 
 It costs about 2 minutes of the run time. Skip it with `--no-explore`.
 

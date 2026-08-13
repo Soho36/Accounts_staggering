@@ -14,7 +14,7 @@ cfg = af.BookCfg(seats=20, seed=1200.0, interval_days=30, policy="time",
 
 RRS = [0.50, 0.75, 1.00, 1.25, 1.50, 2.00, 2.50, 3.00]
 print(f"{'RR':>6}{'trades':>8}{'net $':>10}{'eqDD $':>9}{'froze':>8}{'days':>7}"
-      f"{'seats':>7}{'blow':>6}{'collapse':>10}{'cash med':>10}{'net med':>10}")
+      f"{'seats':>7}{'blow':>6}{'5+ shock':>10}{'cash med':>10}{'mark med':>10}")
 for rr in RRS:
     a = argparse.Namespace(input_csv=None, sweep_root=ROOT / "1_sweeps" / "RR",
                            stats_root=ROOT / "1_sweeps" / "RR_stats", rr=rr,
@@ -50,21 +50,21 @@ for rr in RRS:
     for d in pd.date_range(darr[0].normalize(), darr[-1], freq="QS"):
         if d + horizon > darr[-1]:
             break
-        j = int(np.searchsorted(darr, d)); k = int(np.searchsorted(darr, d + horizon))
-        if k - j > 200:
-            Q.append((j, k))
-    res = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], POLICY, rule, cfg)
-           for j, k in Q]
+        period = af.replay_period(st["parts"], d, d + horizon)
+        if len(period["net"]) > 200:
+            Q.append(period)
+    res = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], POLICY, rule, cfg)
+           for p in Q]
     nets = np.array([r["wealth"] for r in res])
     print(f"{rr:>6.2f}{len(net):>8,}{net.sum():>10,.0f}"
           f"{af.dd_equity(net, mae, mfe):>9,.0f}"
           f"{froze/n:>7.0%}{d2f/max(froze,1):>7.0f}"
           f"{int(np.median([r['bought'] for r in res])):>7}"
           f"{int(np.median([r['deaths'] for r in res])):>6}"
-          f"{np.mean([r['worst_wipe'] >= 5 for r in res]):>9.0%}"
+          f"{np.mean([r['worst_cluster'] >= 5 for r in res]):>9.0%}"
           f"{np.median([r['cash'] for r in res]):>10,.0f}"
           f"{np.median(nets):>10,.0f}")
 
 print("\n  froze/days = share of sampled start dates reaching the Safety Net, and the")
-print("  mean days it took. collapse = share of windows losing a 5+ seat book.")
+print("  mean days it took. shock = share of windows with 5+ same-trade deaths.")
 print("  ALL IN-SAMPLE on 2020-2026. Nothing here is a forward test.")

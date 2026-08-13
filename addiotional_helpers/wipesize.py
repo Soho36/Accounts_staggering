@@ -15,15 +15,7 @@ rule = af.Rule(dd=2500.0, frozen_floor=100.0, cost=200.0, mfe_first=False)
 SEED = 1200.0
 base = dict(seats=20, interval_days=30, policy="time", split=1.0)
 
-horizon = pd.Timedelta(days=int(365.25 * 2.0))
-day_arr = pd.to_datetime(ex)
-Q = []
-for d in pd.date_range(day_arr[0].normalize(), day_arr[-1], freq="QS"):
-    if d + horizon > day_arr[-1]:
-        break
-    j = int(np.searchsorted(day_arr, d)); k = int(np.searchsorted(day_arr, d + horizon))
-    if k - j > 200:
-        Q.append((j, k))
+Q = af.robustness_periods(st, 2.0)
 
 POL = {
  "subscription": (af.BookCfg(**base, seed=0.0, max_per_event=1,
@@ -72,8 +64,8 @@ print(f"{'policy':<24}{'windows w/ wipe':>17}{'wipes from 1-2 seats':>22}"
       f"{'from >=5 seats':>16}{'biggest':>9}")
 for name, (cfg, h) in POL.items():
     allsz, any_w, big_w = [], 0, 0
-    for j, k in Q:
-        s = wipes(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, cfg)
+    for _, p in Q:
+        s = wipes(p["ex"], p["net"], p["mae"], p["mfe"], h, rule, cfg)
         allsz += s
         any_w += bool(s)
         big_w += any(v >= 5 for v in s)

@@ -69,20 +69,20 @@ def pipeline(windows, label):
     horizon = pd.Timedelta(days=int(365.25 * 2.0)); darr = pd.to_datetime(ex); Q = []
     for d in pd.date_range(darr[0].normalize(), darr[-1], freq="QS"):
         if d + horizon > darr[-1]: break
-        j = int(np.searchsorted(darr, d)); k = int(np.searchsorted(darr, d + horizon))
-        if k - j > 200: Q.append((j, k))
-    res = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], POL, rule, cfg)
-           for j, k in Q]
+        period = af.replay_period(st["parts"], d, d + horizon)
+        if len(period["net"]) > 200: Q.append(period)
+    res = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], POL, rule, cfg)
+           for p in Q]
     nets = np.array([r["wealth"] for r in res])
     print(f"{label:<26}{len(st['windows']):>4}{st['offered']:>9,}{st['taken']:>9,}"
           f"{net.sum():>10,.0f}{af.dd_equity(net,mae,mfe):>9,.0f}"
           f"{froze/n:>7.0%}{d2f/max(froze,1):>7.0f}"
-          f"{np.mean([r['worst_wipe']>=5 for r in res]):>9.0%}"
+          f"{np.mean([r['worst_cluster']>=5 for r in res]):>9.0%}"
           f"{np.median(nets):>10,.0f}")
 
 
 print(f"\n{'variant':<26}{'win':>4}{'offered':>9}{'taken':>9}{'net $':>10}"
-      f"{'eqDD $':>9}{'froze':>7}{'days':>7}{'collapse':>9}{'net med':>10}")
+      f"{'eqDD $':>9}{'froze':>7}{'days':>7}{'5+shock':>9}{'mark med':>10}")
 pipeline("all", "all windows (current)")
 pipeline(",".join(keep), f"drop {len(always_neg)} always-losing")
 if both_halves:

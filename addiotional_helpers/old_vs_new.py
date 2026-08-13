@@ -61,31 +61,21 @@ def book(rr_map, label, start="2023-01-01"):
     for w in wins:
         d = load(w, rr_map[w])
         if d is None: continue
-        d = d.sort_values("Exit_time")
-        parts.append({"en": d["Entry_time"].values.astype("datetime64[s]"),
-                      "ex": d["Exit_time"].values.astype("datetime64[s]"),
-                      "net": (d["PNL"].values - C).astype(float),
-                      "mae": d["MAE"].values.astype(float),
-                      "mfe": d["MFE"].values.astype(float)})
-    keep = af.replay(parts)
-    rows = []
-    for t, m in zip(parts, keep):
-        for i in np.flatnonzero(m):
-            rows.append((t["ex"][i], t["net"][i], t["mae"][i], t["mfe"][i]))
-    rows.sort(key=lambda r: r[0])
-    ex = np.array([r[0] for r in rows])
-    msk = ex >= np.datetime64(pd.Timestamp(start))
-    ex = ex[msk]
-    net = np.array([r[1] for r in rows])[msk]
-    mae = np.array([r[2] for r in rows])[msk]
-    mfe = np.array([r[3] for r in rows])[msk]
-    horizon = pd.Timedelta(days=365); darr = pd.to_datetime(ex); Q = []
-    for d in pd.date_range(darr[0].normalize(), darr[-1], freq="QS"):
-        if d + horizon > darr[-1]: break
-        j = int(np.searchsorted(darr, d)); k = int(np.searchsorted(darr, d + horizon))
-        if k - j > 150: Q.append((j, k))
-    res = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], POL, rule, cfg)
-           for j, k in Q]
+        parts.append(af._part(d))
+
+    # This helper deliberately constructs a different offered stream for each
+    # rr_map. Start that custom stream flat at the OOS boundary, then independently
+    # replay every quarterly robustness year. replay_period keeps a cross-horizon
+    # position in the blocking replay while excluding its post-horizon result.
+    last_exit = max(t["ex"].max() for t in parts if len(t["ex"]))
+    full = af.replay_period(
+        parts, pd.Timestamp(start), pd.Timestamp(last_exit) + pd.Timedelta(seconds=1)
+    )
+    ex, net, mae, mfe = full["ex"], full["net"], full["mae"], full["mfe"]
+    custom_stream = {**full, "parts": parts}
+    Q = af.robustness_periods(custom_stream, 1.0, min_trades=150)
+    res = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], POL, rule, cfg)
+           for _, p in Q]
     nets = np.array([r["wealth"] for r in res])
     print(f"{label:<38}{len(net):>8,}{net.sum():>10,.0f}"
           f"{af.dd_equity(net,mae,mfe):>9,.0f}{np.median(nets):>11,.0f}"

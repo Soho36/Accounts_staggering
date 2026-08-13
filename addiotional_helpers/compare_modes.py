@@ -42,15 +42,7 @@ for name, (cfg, h) in POL.items():
           f"{b['live']:>6}{own:>9,.0f}{b['withdrawn']:>11,.0f}"
           f"{b['equity']:>11,.0f}{b['wealth']:>11,.0f}")
 
-horizon = pd.Timedelta(days=int(365.25 * 2.0))
-day_arr = pd.to_datetime(ex)
-q = []
-for d in pd.date_range(day_arr[0].normalize(), day_arr[-1], freq="QS"):
-    if d + horizon > day_arr[-1]:
-        break
-    j = int(np.searchsorted(day_arr, d)); k = int(np.searchsorted(day_arr, d + horizon))
-    if k - j > 200:
-        q.append((j, k))
+q = af.robustness_periods(st, 2.0)
 
 print("\n" + "=" * 104)
 print(f"B. THE SAME POLICIES OVER ALL {len(q)} TWO-YEAR WINDOWS  (the distribution)")
@@ -58,8 +50,8 @@ print("=" * 104)
 print(f"{'policy':<34}{'wipe%':>7}{'ruin%':>7}{'worst':>10}{'net p10':>10}"
       f"{'net med':>10}{'net p90':>10}{'<=own?':>8}")
 for name, (cfg, h) in POL.items():
-    res = [af.run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, cfg)
-           for j, k in q]
+    res = [af.run_book(p["ex"], p["net"], p["mae"], p["mfe"], h, rule, cfg)
+           for _, p in q]
     nets = np.array([r["wealth"] for r in res])
     own = np.array([cfg.seed + r["spent"] for r in res])
     print(f"{name:<34}"

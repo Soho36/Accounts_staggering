@@ -79,6 +79,7 @@ DEPOSIT = 5000.0            # tester deposit, used only to spot liquidated passe
 # commission (too large, and it tracks trade risk), so the real cost has to be
 # applied here. This is the broker's actual figure and is not a tuning knob.
 COMMISSION_ROUNDTURN = 1.05
+CANONICAL_WINDOWS = tuple(f"{hour}-{hour + 1}" for hour in range(1, 24))
 
 # Reference figures from an MT5 run of the same configuration (RR strategy, all
 # windows, RR 1.0, 2020-01 to 2026-07). Kept as a reconstruction check: if the
@@ -181,7 +182,11 @@ def read_trade_file(path: Path) -> pd.DataFrame:
     last_error: UnicodeDecodeError | None = None
     for encoding in ("utf-8", "utf-16", "cp1252"):
         try:
-            raw = pd.read_csv(path, sep="\t", header=None, dtype=str, encoding=encoding)
+            # The historical sweep files are tab separated, while --input-csv
+            # also promises ordinary CSV.  Let pandas sniff the delimiter so a
+            # fresh export does not need a manual conversion first.
+            raw = pd.read_csv(path, sep=None, engine="python", header=None,
+                              dtype=str, encoding=encoding)
             break
         except UnicodeDecodeError as error:
             last_error = error
@@ -196,8 +201,13 @@ def read_trade_file(path: Path) -> pd.DataFrame:
         columns = [str(value).strip() for value in raw.iloc[0].tolist()]
         raw = raw.iloc[1:].reset_index(drop=True)
         raw.columns = columns
-        aliases = {"ticket": "Ticket", "entry_time": "Entry_time",
-                   "exit_time": "Exit_time", "mae": "MAE", "mfe": "MFE", "pnl": "PNL"}
+        aliases = {
+            "ticket": "Ticket", "#": "Ticket", "id": "Ticket",
+            "entry_time": "Entry_time", "exit_time": "Exit_time",
+            "mae": "MAE", "mae_money": "MAE",
+            "mfe": "MFE", "mfe_money": "MFE",
+            "pnl": "PNL", "trade_profit": "PNL",
+        }
         raw = raw.rename(columns={c: aliases.get(c.lower(), c) for c in raw.columns})
     else:
         if raw.shape[1] < 6:
@@ -282,14 +292,46 @@ def _part(frame: pd.DataFrame) -> dict:
     }
 
 
+def _filter_part_dates(t: dict, start_date=None, end_date=None) -> dict:
+    """Apply entry boundaries before replay.
+
+    A dated evaluation starts flat.  Replaying the whole history first and then
+    filtering by exit date lets a pre-period position into the result and lets it
+    block entries after the boundary.  Applying the boundary here also makes
+    chronological holdouts independent of whatever happened before them.  The
+    Cross-horizon positions remain present so they can block overlapping entries;
+    their outcomes are removed after replay by the caller.
+    """
+    mask = np.ones(len(t["en"]), dtype=bool)
+    if start_date:
+        mask &= t["en"] >= np.datetime64(pd.Timestamp(start_date))
+    if end_date:
+        end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        mask &= t["en"] < np.datetime64(end)
+    return {key: value[mask] for key, value in t.items()}
+
+
 def build_stream(a) -> dict:
     """The trade stream one seat actually trades, after single-position replay."""
+    requested, missing = [], []
     if a.input_csv:
         parts, kept, blown, unknown = [_part(read_trade_file(a.input_csv))], \
             [a.input_csv.name], [], []
+        requested = [a.input_csv.name]
     else:
         parts, kept, blown, unknown = [], [], [], []
-        for path in sweep_files(a.sweep_root, a.rr, a.windows):
+        wanted = (None if a.windows.lower() == "all" else
+                  {w.strip() for w in a.windows.split(",")})
+        available = {p.name: p for p in a.sweep_root.iterdir() if p.is_dir()}
+        requested = sorted(CANONICAL_WINDOWS if wanted is None else wanted,
+                           key=lambda w: int(w.split("-", 1)[0]))
+        directories = [available[w] for w in requested if w in available]
+        missing = [w for w in requested
+                   if w not in available or
+                   not (available[w] / f"{w}_{a.rr:.2f}.csv").is_file()]
+        selected_windows = (a.windows if wanted is not None else
+                            ",".join(CANONICAL_WINDOWS))
+        for path in sweep_files(a.sweep_root, a.rr, selected_windows):
             window = path.parent.name
             state = pass_is_blown(a.stats_root, window, a.rr)
             if state is True:
@@ -300,33 +342,57 @@ def build_stream(a) -> dict:
             parts.append(_part(read_trade_file(path)))
             kept.append(window)
 
+        if (missing or blown or unknown) and not getattr(a, "allow_incomplete", False):
+            details = []
+            if missing:
+                details.append("missing exports: " + ", ".join(missing))
+            if blown:
+                details.append("tester-truncated passes: " + ", ".join(blown))
+            if unknown:
+                details.append("passes without stats: " + ", ".join(unknown))
+            raise ValueError(
+                f"RR {a.rr:.2f} has an incomplete window universe ("
+                + "; ".join(details)
+                + "). Comparisons would be biased. Regenerate the passes or use "
+                  "--allow-incomplete for an explicitly diagnostic run."
+            )
+
+    # Date boundaries define a fresh, flat evaluation.  Filter offered entries
+    # before replay rather than replaying the training history into a holdout.
+    parts = [_filter_part_dates(t, getattr(a, "start_date", None),
+                                getattr(a, "end_date", None)) for t in parts]
     keep = replay(parts)
     rows = []
+    result_end = (np.datetime64(pd.Timestamp(getattr(a, "end_date"))
+                                + pd.Timedelta(days=1))
+                  if getattr(a, "end_date", None) else None)
     for t, m in zip(parts, keep):
         for i in np.flatnonzero(m):
+            if result_end is not None and t["ex"][i] >= result_end:
+                continue
             rows.append((t["ex"][i], t["net"][i], t["mae"][i], t["mfe"][i],
                          t["en"][i]))
     rows.sort(key=lambda r: r[0])
 
-    ex = np.array([r[0] for r in rows])
-    mask = np.ones(len(ex), dtype=bool)
-    if a.start_date:
-        mask &= ex >= np.datetime64(pd.Timestamp(a.start_date))
-    if a.end_date:
-        mask &= ex < np.datetime64(pd.Timestamp(a.end_date) + pd.Timedelta(days=1))
-    if not mask.any():
+    if not rows:
         raise ValueError("No trades remain after the date filter.")
 
     return {
-        "ex": ex[mask],
-        "net": np.array([r[1] for r in rows])[mask],
-        "mae": np.array([r[2] for r in rows])[mask],
-        "mfe": np.array([r[3] for r in rows])[mask],
+        "ex": np.array([r[0] for r in rows]),
+        "net": np.array([r[1] for r in rows]),
+        "mae": np.array([r[2] for r in rows]),
+        "mfe": np.array([r[3] for r in rows]),
         # Entry times survive the replay so the single-seat study can ask "which
         # trades could an account opened on day D actually have held?". After the
         # one-position replay nothing overlaps, so this array is sorted.
-        "en": np.array([r[4] for r in rows])[mask],
-        "windows": kept, "blown": blown, "unknown": unknown,
+        "en": np.array([r[4] for r in rows]),
+        # Retain the date-filtered offered streams so robustness windows can start
+        # flat and replay their own competition instead of slicing decisions made
+        # by a position that existed before the window.
+        "parts": parts,
+        "windows": kept, "requested_windows": requested, "missing": missing,
+        "blown": blown, "unknown": unknown,
+        "complete": not (missing or blown or unknown),
         "offered": sum(len(p["en"]) for p in parts),
         "taken": sum(int(m.sum()) for m in keep),
     }
@@ -371,7 +437,11 @@ def dd_paths(ex, net, mae, mfe) -> pd.DataFrame:
 # -------------------------------------------------------------- accounts ----
 def new_account(i0, rule: Rule):
     return {"i0": i0, "eq": 0.0, "peak": 0.0, "floor": -rule.dd,
-            "frozen": False, "banked": 0.0, "alive": True}
+            "frozen": False, "banked": 0.0, "alive": True,
+            # Closed trading P&L before payouts.  Start-policy drawdown must use
+            # this path; otherwise taking a payout looks exactly like a loss and
+            # can spuriously launch another account.
+            "trade_eq": 0.0, "trade_peak": 0.0}
 
 
 def _lift(a, mf, rule: Rule):
@@ -400,12 +470,18 @@ def step(a, n, ma, mf, h: Harvest, rule: Rule):
     """Advance one account by one trade. Returns cash withdrawn on this trade."""
     if rule.mfe_first:                                 # conservative ordering
         _lift(a, mf, rule)
+        a["trade_peak"] = max(a["trade_peak"],
+                              a["trade_eq"] + max(mf, 0.0))
     if a["eq"] + min(ma, 0.0) <= a["floor"]:           # intraday dip kills it
         a["alive"] = False
         return 0.0
     if not rule.mfe_first:                             # MAE-first: lift after
         _lift(a, mf, rule)
+        a["trade_peak"] = max(a["trade_peak"],
+                              a["trade_eq"] + max(mf, 0.0))
     a["eq"] += n
+    a["trade_eq"] += n
+    a["trade_peak"] = max(a["trade_peak"], a["trade_eq"])
     a["peak"] = max(a["peak"], a["eq"])
     a["floor"] = min(a["peak"] - rule.dd, rule.frozen_floor)
     if a["eq"] <= a["floor"]:
@@ -444,12 +520,103 @@ def should_start(live, day, last_start, cfg: BookCfg) -> bool:
         return False
     if cfg.policy in ("time", "any") and days >= cfg.interval_days:
         return True
-    if cfg.policy in ("profit", "any") and live and live[-1]["eq"] >= cfg.profit_trigger:
+    if cfg.policy in ("profit", "any") and live and \
+            live[-1]["trade_eq"] >= cfg.profit_trigger:
         return True
     if cfg.policy in ("dd", "any") and live and \
-            min(a["eq"] - a["peak"] for a in live) <= -cfg.dd_trigger:
+            min(a["trade_eq"] - a["trade_peak"] for a in live) <= -cfg.dd_trigger:
         return True
     return False
+
+
+def death_event_metrics(n_before: int, n_after: int) -> dict:
+    """Describe one trade's liquidation shock independently of book size."""
+    deaths = max(0, n_before - n_after)
+    return {
+        "deaths": deaths,
+        "fraction": deaths / n_before if n_before else 0.0,
+        "full_wipe": bool(n_before and n_after == 0),
+        "large_shock": deaths >= 5,
+    }
+
+
+def replay_period(parts: list[dict], start_date, end_date) -> dict:
+    """Build a fresh-flat stream for one evaluation period.
+
+    Period-level robustness must call this instead of slicing a replay performed
+    over a longer history; otherwise a pre-period position can block an entry the
+    new book would actually have taken.
+    """
+    start = np.datetime64(pd.Timestamp(start_date))
+    end = np.datetime64(pd.Timestamp(end_date))
+    period_parts = []
+    for part in parts:
+        # A new book starts flat: no pre-start entry. A trade whose result lands
+        # at/after the horizon is not scored, but it must remain in replay because
+        # its open position can block another pre-horizon entry.
+        mask = (part["en"] >= start) & (part["en"] < end)
+        period_parts.append({key: value[mask] for key, value in part.items()})
+    keep = replay(period_parts)
+    rows = []
+    for part, mask in zip(period_parts, keep):
+        for i in np.flatnonzero(mask):
+            if part["ex"][i] >= end:
+                continue
+            rows.append((part["ex"][i], part["net"][i], part["mae"][i],
+                         part["mfe"][i], part["en"][i]))
+    rows.sort(key=lambda row: (row[0], row[4]))
+    if not rows:
+        raise ValueError("No trades remain in the fresh-flat evaluation period.")
+    return {
+        "ex": np.array([row[0] for row in rows]),
+        "net": np.array([row[1] for row in rows]),
+        "mae": np.array([row[2] for row in rows]),
+        "mfe": np.array([row[3] for row in rows]),
+        "en": np.array([row[4] for row in rows]),
+        "offered": sum(len(part["en"]) for part in period_parts),
+        "taken": sum(int(mask.sum()) for mask in keep),
+    }
+
+
+def robustness_periods(stream: dict, horizon_years: float,
+                       min_trades: int = 200) -> list[tuple[pd.Timestamp, dict]]:
+    """Quarterly-started, independently replayed evaluation streams."""
+    dates = pd.to_datetime(stream["ex"])
+    horizon = pd.Timedelta(days=int(365.25 * horizon_years))
+    periods = []
+    for start in pd.date_range(dates[0].normalize(), dates[-1], freq="QS"):
+        if start + horizon > dates[-1]:
+            break
+        period = replay_period(stream["parts"], start, start + horizon)
+        if len(period["net"]) > min_trades:
+            periods.append((start, period))
+    return periods
+
+
+def book_terminal_values(live, cash: float, spent: float, cfg: BookCfg,
+                         rule: Rule) -> dict:
+    """Return realized, safely cashable, and mark-to-model book values.
+
+    `withdrawable` preserves every frozen seat at the Safety Net.  It deliberately
+    assigns zero cash value to non-frozen seats and to cushion below that level.
+    `equity` is an optimistic continuation value: positive P&L in every live seat,
+    whether payout-eligible yet or not.  Negative prop P&L is not a debt owed by
+    the trader, so it is shown separately and never subtracted from owned wealth.
+    """
+    raw_prop_pnl = sum(a["eq"] for a in live)
+    equity = sum(max(0.0, a["eq"]) for a in live) * cfg.split
+    withdrawable = sum(
+        max(0.0, a["eq"] - rule.safety_net) for a in live if a["frozen"]
+    ) * cfg.split
+    own_capital = cfg.seed + spent
+    return {
+        "equity": equity,
+        "raw_prop_pnl": raw_prop_pnl,
+        "withdrawable": withdrawable,
+        "realized_wealth": cash - own_capital,
+        "cashout_wealth": cash + withdrawable - own_capital,
+        "wealth": cash + equity - own_capital,
+    }
 
 
 def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=False):
@@ -465,11 +632,28 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
     no longer buys anything.
     """
     hard = Harvest("level", keep=rule.safety_net)
-    cash, live, bought, deaths, withdrawn, spent = cfg.seed, [], 0, 0, 0.0, 0.0
+    cash, live, bought, deaths, withdrawn, gross_withdrawn, spent = (
+        cfg.seed, [], 0, 0, 0.0, 0.0, 0.0)
     last_start, series, ruined, done, wipeouts = None, [], False, [], 0
-    worst_wipe = 0          # most seats ever lost in a single collapse
+    start_indices = set()
+    worst_wipe = 0          # largest whole book that went to zero
+    worst_cluster = 0       # most seats lost on any one trade, even if some survived
+    worst_cluster_fraction = 0.0
+    cluster_events = 0      # trades that liquidated five or more seats together
     for i in range(len(net)):
         day = pd.Timestamp(ex[i])
+
+        # Capture an adverse-excursion trigger before step() can liquidate and
+        # remove the last seat. This uses the payout-independent trading path.
+        adverse_dd_due = False
+        if cfg.policy in ("dd", "any") and live and (
+                last_start is None or (day - last_start).days >= cfg.min_days):
+            adverse_dd_due = min(
+                a["trade_eq"] + min(mae[i], 0.0)
+                - (max(a["trade_peak"], a["trade_eq"] + max(mfe[i], 0.0))
+                   if rule.mfe_first else a["trade_peak"])
+                for a in live
+            ) <= -cfg.dd_trigger
 
         # 1. Apply the trade to the seats that were already open. Buying happens
         #    afterwards, because ex[i] is this trade's EXIT: an account opened at
@@ -480,9 +664,13 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
             got += step(a, net[i], mae[i], mfe[i], k, rule)
             if trace:
                 a["path"].append((day, a["eq"] + a["banked"]))
+        gross_withdrawn += got
         got *= cfg.split                               # only the trader's share
         cash += got
         withdrawn += got
+        # Evaluate endogenous triggers before dead seats are buried. A DD event
+        # that kills the last seat is still a DD event and may fund a replacement.
+        start_due = adverse_dd_due or should_start(live, day, last_start, cfg)
 
         # 2. Bury the dead.
         n0 = len(live)
@@ -492,7 +680,14 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
             if not a["alive"]:
                 a["end"] = day
         live = [a for a in live if a["alive"]]
-        deaths += n0 - len(live)
+        event = death_event_metrics(n0, len(live))
+        event_deaths = event["deaths"]
+        deaths += event_deaths
+        if event_deaths:
+            worst_cluster = max(worst_cluster, event_deaths)
+            worst_cluster_fraction = max(worst_cluster_fraction,
+                                         event["fraction"])
+            cluster_events += event["large_shock"]
         # Seats bought together are identical, so they die together. Losing the
         # whole book at once is survivable while cash can rebuy it, which is why
         # it never shows up in the ruin rate - count it separately. Record how
@@ -505,7 +700,13 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
 
         # 3. Buy, from whatever is in the pot now. The new seat starts trading on
         #    the next trade in the stream.
-        if len(live) < cfg.seats and should_start(live, day, last_start, cfg):
+        # Profit/DD policies would otherwise strand an empty but funded book:
+        # with no live account the trigger can never fire again. A replacement
+        # after the minimum spacing is baseline continuity, not an alpha trigger.
+        restart_due = (not live and
+                       (last_start is None or
+                        (day - last_start).days >= cfg.min_days))
+        if len(live) < cfg.seats and (start_due or restart_due):
             room = cfg.seats - len(live)
             if cfg.funding == "external":
                 n_buy = min(cfg.max_per_event, room)
@@ -527,6 +728,7 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
                     cash -= rule.cost
                 bought += 1
                 last_start = day
+                start_indices.add(i + 1)
 
         if cfg.funding == "cash" and not live and cash < rule.cost:
             ruined = True                              # absorbing state
@@ -534,19 +736,32 @@ def run_book(ex, net, mae, mfe, h: Harvest, rule: Rule, cfg: BookCfg, trace=Fals
         # was already split when it arrived; charging it twice would be wrong,
         # and leaving equity gross would quietly mix a pre-split number with a
         # post-split one in the same total.
-        equity = sum(a["eq"] for a in live) * cfg.split
-        series.append((day, len(live), withdrawn, cash, equity, spent,
-                       cash + equity - cfg.seed - spent))
+        values = book_terminal_values(live, cash, spent, cfg, rule)
+        series.append((day, len(live), withdrawn, cash, values["raw_prop_pnl"],
+                       values["equity"], values["withdrawable"], spent,
+                       values["realized_wealth"], values["cashout_wealth"],
+                       values["wealth"]))
 
     S = pd.DataFrame(series, columns=["day", "live", "withdrawn", "cash",
-                                      "equity", "spent", "wealth"])
-    equity = sum(a["eq"] for a in live) * cfg.split
+                                      "raw_prop_pnl", "equity", "withdrawable", "spent",
+                                      "realized_wealth", "cashout_wealth",
+                                      "wealth"])
+    values = book_terminal_values(live, cash, spent, cfg, rule)
     return {"series": S, "bought": bought, "deaths": deaths, "cash": cash,
-            "equity": equity, "withdrawn": withdrawn, "spent": spent,
+            "equity": values["equity"],
+            "raw_prop_pnl": values["raw_prop_pnl"],
+            "withdrawable": values["withdrawable"],
+            "withdrawn": withdrawn, "gross_withdrawn": gross_withdrawn,
+            "spent": spent,
             "live": len(live), "ruined": ruined, "seats": done + live,
             "wipeouts": wipeouts, "worst_wipe": worst_wipe,
-            "starts": len({a["i0"] for a in done + live}),
-            "wealth": cash + equity - cfg.seed - spent}
+            "worst_cluster": worst_cluster,
+            "worst_cluster_fraction": worst_cluster_fraction,
+            "cluster_events": cluster_events,
+            "starts": len(start_indices),
+            "realized_wealth": values["realized_wealth"],
+            "cashout_wealth": values["cashout_wealth"],
+            "wealth": values["wealth"]}
 
 
 def monthly(index, values, cumulative: bool):
@@ -599,8 +814,9 @@ _TPL = r"""<!DOCTYPE html>
  .pstat .bad{color:#b91c1c}.pstat .ok{color:#15803d}
 </style></head><body>
 <header><h1>Prop-account farming &mdash; buy seats, harvest the survivors</h1>
-<p>RR strategy, every window, RR __RRV__, $__DDV__ trailing drawdown, $__COSTV__ per seat,
-$__COMMV__ round-turn commission, a new seat every __IVLV__ days.</p>
+<p>RR __RRV__, __WINDOWSV__, $__DDV__ DD, $__COSTV__ per seat, $__COMMV__ commission;
+Mode 2 seed $__SEEDV__, split __SPLITV__, start __STARTV__, every __IVLV__ days;
+sample __DATEV__.</p>
 </header><main>
 <div class="cards" id="cards"></div>
 <div class="warn"><b>This is leverage, not alpha.</b> Every seat trades identical
@@ -676,30 +892,27 @@ seat at a time, and withdraw a share of gains instead of stripping to a level.</
 <h2>5 &middot; Both modes, across every window</h2>
 <div class="panel"><div id="c_keep" style="height:560px"></div>
  <div class="note">Median cash <b>in hand</b> &mdash; the pot balance at the end, after
- seats were rebought out of it, and already net of the profit split. The gross amount
- ever withdrawn is larger and is its own column in the table. Across every __NWIN__
+ seats were rebought out of it, and already net of the profit split. Cumulative payout
+ received is larger and is its own column in the table. Across every __NWIN__
  overlapping __HZV__-year window; whiskers are p10 to p90. Read the whisker, not the bar &mdash; the spread is wider
  than the difference between most policies. The subscription bar is zero by construction:
  it never withdraws, so all of its value sits in the equity column of the table instead.</div></div>
 <div class="panel"><div id="c_vs" style="height:400px"></div>
- <div class="note">Net position over time for both illustrative books, on the same axis:
- cash withdrawn plus equity still in live seats, minus every dollar of own capital put in.
- The subscription line is what you would have if you never took a cent out; the bootstrap
- line is mostly money already banked.</div>
+ <div class="note">Cashable position over time for both illustrative books, on the same
+ axis: pot cash plus surplus currently withdrawable while preserving frozen seats, minus
+ every dollar of own capital put in. Unfrozen prop P&amp;L is deliberately excluded.</div>
  <div class="onepath">One illustrative path each, not an expectation.</div></div>
 
 <h2>6 &middot; Which policy? &mdash; the decision</h2>
 <div class="panel"><div id="c_front" style="height:480px"></div>
  <div class="note"><b>How to read this.</b> Up is a better typical outcome; right is a
  better bad case. A policy with another policy above <i>and</i> to the right of it is
- <b>dominated</b> &mdash; strictly worse on both counts, so there is no preference under
- which you would pick it. Those are drawn hollow. The line joins what is left: the
- frontier, where buying more typical outcome costs you downside. Green outlines never lost
- the whole book in any window; red outlines did.</div>
- <div class="note">Both axes are <b>net</b> = cash withdrawn + equity still live &minus;
- own capital spent, over a __HZV__-year window. Net is the only measure the two funding
- modes can share, but it mixes banked cash with equity that can still be lost &mdash; the
- <i>banked</i> share in the hover is how much of it you would actually be holding.</div></div>
+ <b>dominated on these two cashout summaries</b>. Those points are hollow, but a different
+ preference (timing, shock risk, or capital use) may still choose one. Green outlines had
+ no observed 5+ seat shock in these windows; red outlines did.</div>
+ <div class="note">Both axes use <b>cashout</b> = cash in the pot + endpoint surplus that
+ can be withdrawn while preserving frozen seats &minus; own capital. These are overlapping
+ historical windows, not independent forecasts.</div></div>
 <div class="panel" style="overflow:auto" id="t_pick"></div>
 <div class="note">Same numbers, sorted by what you might care about. Pick the row whose
 constraint is really yours, not the biggest number: these are medians of __NWIN__
@@ -717,8 +930,8 @@ kept working, not what happens if it stops.</div>
  baseline everything else is built on. This one <i>is</i> a property of the data rather
  than of a policy choice.</div></div>
 <div class="panel"><div id="c_mbook" style="height:360px"></div>
- <div class="note">The business: month-on-month change in cash withdrawn plus equity still
- inside live seats, with seat purchases charged as the expenses they are. Losing months are
+ <div class="note">The business: month-on-month change in pot cash plus the surplus safely
+ withdrawable from frozen seats, with seat purchases charged as expenses. Losing months are
  deeper than the strategy's own because every live seat takes the same loss at once.</div>
  <div class="onepath"><b>One illustrative path, not a track record.</b> A different seed,
  start date or withdrawal level moves these bars a long way &mdash; treat the win rate as a
@@ -727,10 +940,10 @@ kept working, not what happens if it stops.</div>
 <h2>8 &middot; Every policy, across all windows</h2>
 <div class="panel" style="overflow:auto" id="t_keep"></div>
 <div class="note"><b>cash in hand</b> is the pot balance, already net of the split;
-<b>total withdrawn</b> is the gross ever taken out, and the two differ by whatever was
-spent rebuying seats. Equity is still inside live accounts and can be lost
-&mdash; never add the two together and call it profit. <b>net</b> = cash + equity &minus;
-own capital spent, which is the only column the two modes can be compared on.
+<b>payout received</b> is the cumulative post-split cash received, and the two differ by
+whatever was spent rebuying seats. <b>cashout</b> adds only endpoint-withdrawable surplus
+above the Safety Net on frozen seats, then subtracts own capital. <b>mark-to-model</b>
+also credits positive P&amp;L in accounts that may not yet be payout-eligible; it is not cash.
 <b>blowups</b> is the median number of seats liquidated per window.</div>
 <div class="warn"><b>Read the wipeout column before the cash column.</b> "Ruin" means the
 book ended with no seats <i>and</i> too little cash to replace one &mdash; a book that loses
@@ -742,12 +955,12 @@ they were defined.</div>
 
 <h2>9 &middot; Reconstruction check</h2>
 <div class="panel" style="overflow:auto" id="t_rec"></div>
-<div class="note">The merged single-position stream against a real MT5 run of the same
-configuration. It still runs a few percent light, because the sweeps were each generated
-in isolation so this merge approximates the blocking rather than reproducing it. The
-drawdown comes out slightly <i>worse</i> than MT5's because $__COMMV__ per round turn is
-charged here and was not in that tester run &mdash; so these figures are the conservative
-side of the comparison.</div>
+<div class="note">The MT5 reference is shown only for its matching configuration: RR 1,
+all 23 windows, the full unfiltered sweep history, and the canonical project inputs. For a
+custom RR, date range, input file, or window subset the MT5 column is marked not comparable.
+On the matching run this reconstruction is still a few percent light because isolated
+sweeps can only approximate cross-window blocking; it also charges $__COMMV__ per round
+turn, which that tester run did not.</div>
 <div class="note" id="foot"></div>
 </main><script>
 const D=__DATA__,CFG={displaylogo:false,responsive:true};
@@ -774,29 +987,29 @@ function seatchart(id,curves,title){
 seatchart('c_sub_seats',D.sub.curves,
  'Subscription - every seat, P&L including cash withdrawn (never)');
 Plotly.newPlot('c_sub',[
- {x:D.sub.x,y:D.sub.equity,type:'scatter',mode:'lines',name:'portfolio equity',
+ {x:D.sub.x,y:D.sub.raw_prop_pnl,type:'scatter',mode:'lines',name:'raw portfolio P&L',
   fill:'tozeroy',line:{width:1.8,color:'#15803d'},fillcolor:'rgba(21,128,61,.14)'},
  {x:D.sub.x,y:D.sub.spent,type:'scatter',mode:'lines',name:'own capital spent',
   line:{width:1.4,color:'#b91c1c',dash:'dot',shape:'hv'}},
  {x:D.sub.x,y:D.sub.live,type:'scatter',mode:'lines',name:'seats held',
   yaxis:'y2',line:{width:1,color:'#4e79a7',shape:'hv'}}],
  Object.assign({margin:{l:70,r:60,t:28,b:34},font:F,hovermode:'x unified',
-  title:{text:'Subscription - portfolio equity against capital put in',x:0,
+   title:{text:'Subscription - raw prop P&L against capital put in',x:0,
    font:{size:13}},
   xaxis:{type:'date',gridcolor:'#eef0f3'},
   yaxis:{title:'$',gridcolor:'#eef0f3'},
   yaxis2:{title:'seats',overlaying:'y',side:'right',showgrid:false,rangemode:'tozero'},
   legend:{orientation:'h',y:-.16}},BG),CFG);
 Plotly.newPlot('c_vs',[
- {x:D.sub.x,y:D.sub.wealth,type:'scatter',mode:'lines',name:'mode 1 - subscription',
+ {x:D.sub.x,y:D.sub.cashout,type:'scatter',mode:'lines',name:'mode 1 - subscription',
   line:{width:2,color:'#15803d'}},
- {x:D.boot.x,y:D.boot.wealth,type:'scatter',mode:'lines',name:'mode 2 - bootstrap',
+ {x:D.boot.x,y:D.boot.cashout,type:'scatter',mode:'lines',name:'mode 2 - bootstrap',
   line:{width:2,color:'#4e79a7'}},
- {x:D.boot.x,y:D.boot.cash,type:'scatter',mode:'lines',
-  name:'mode 2 - of which already banked',
+ {x:D.boot.x,y:D.boot.realized_path,type:'scatter',mode:'lines',
+  name:'mode 2 - realized pot net of own capital',
   line:{width:1.3,color:'#4e79a7',dash:'dot'}}],
  Object.assign({margin:{l:74,r:14,t:28,b:34},font:F,hovermode:'x unified',
-  title:{text:'Net position - cash plus equity, less own capital spent',x:0,
+   title:{text:'Cashout position - cash plus safely withdrawable surplus',x:0,
    font:{size:13}},
   xaxis:{type:'date',gridcolor:'#eef0f3'},
   yaxis:{title:'$',gridcolor:'#eef0f3'},
@@ -839,8 +1052,8 @@ Plotly.newPlot('c_dd',[
   annotations:[{xref:'paper',x:0.01,y:-D.dd_limit,text:'a fresh seat dies here',
    showarrow:false,yshift:-10,font:{size:11,color:'#b91c1c'}}],
   legend:{orientation:'h',y:-.18}},BG),CFG);
-// Horizontal, because the policy names are sentences. Wipeout-free bootstrap
-// policies are green, ones that lost the whole book are red, mode 1 is grey.
+ // Horizontal, because the policy names are sentences. Policies with no observed
+ // 5+ seat shock are green; policies with such a shock are red; mode 1 is grey.
 Plotly.newPlot('c_keep',[{
  x:D.keep.med,y:D.keep.labels,type:'bar',orientation:'h',
  marker:{color:D.keep.colour},
@@ -865,7 +1078,7 @@ function drawPolicy(i){
    fillcolor:'rgba(78,121,167,.22)'},
   {x:b.x,y:b.cash,type:'scatter',mode:'lines',name:'cash withdrawn',
    yaxis:'y2',line:{width:2,color:'#15803d'}},
-  {x:b.x,y:b.equity,type:'scatter',mode:'lines',name:'equity in live seats',
+  {x:b.x,y:b.equity,type:'scatter',mode:'lines',name:'optimistic positive prop credit',
    yaxis:'y2',line:{width:1.4,color:'#b07aa1',dash:'dot'}},
   {x:b.x,y:b.hand,type:'scatter',mode:'lines',name:'cash on hand (buying power)',
    yaxis:'y2',line:{width:1.2,color:'#c2760c'}}],
@@ -886,12 +1099,14 @@ function drawPolicy(i){
  document.getElementById('p_stat').innerHTML=
   `<span>seats bought <b>${b.bought}</b> on <b>${b.starts}</b> dates</span>`+
   `<span>blowups <b>${b.deaths}</b></span>`+
+  `<span>worst same-trade shock <b class="${b.worst_cluster>=5?'bad':'ok'}">${b.worst_cluster}</b></span>`+
   `<span>full wipeouts <b class="${b.wipeouts?'bad':'ok'}">${b.wipeouts}</b></span>`+
   `<span>alive at end <b>${b.live_end}</b></span>`+
   `<span>withdrawn <b>${money(b.withdrawn)}</b></span>`+
   `<span>cash in hand <b class="ok">${money(b.final_cash)}</b></span>`+
   `<span>equity left <b>${money(b.final_equity)}</b></span>`+
-  `<span>net <b>${money(b.net)}</b></span>`;}
+  `<span>safe endpoint payout <b>${money(b.final_withdrawable)}</b></span>`+
+  `<span>cashout <b>${money(b.cashout_final)}</b></span>`;}
 document.getElementById('picks').innerHTML=D.books.map((b,i)=>
  `<button class="pick" onclick="drawPolicy(${i})"><span class="dot" style="background:${
   b.colour}"></span>${b.name}</button>`).join('');
@@ -909,11 +1124,11 @@ Plotly.newPlot('c_front',[
   customdata:D.front.info,showlegend:false,
   hovertemplate:'<b>%{customdata[0]}</b><br>%{customdata[1]}<extra></extra>'}],
  Object.assign({margin:{l:80,r:150,t:30,b:52},font:F,
-  title:{text:'Typical outcome against bad case - hollow markers are dominated',
+   title:{text:'Cashable outcome - hollow markers are dominated on these two axes only',
    x:0,font:{size:13}},
-  xaxis:{title:'net at p10, the bad case  $',gridcolor:'#eef0f3',zeroline:true,
+   xaxis:{title:'cashout at p10  $',gridcolor:'#eef0f3',zeroline:true,
    zerolinecolor:'#9ca3af'},
-  yaxis:{title:'net at the median  $',gridcolor:'#eef0f3'}},BG),CFG);
+   yaxis:{title:'cashout at the median  $',gridcolor:'#eef0f3'}},BG),CFG);
 function bars(id,m,title,ylab){
  Plotly.newPlot(id,[{x:m.x,y:m.y,type:'bar',
   marker:{color:m.y.map(v=>v>=0?'#59a14f':'#e15759'),
@@ -930,26 +1145,29 @@ function bars(id,m,title,ylab){
     font:{size:11.5,color:'#3f3f46'},bgcolor:'#fef9c3',bordercolor:'#e5d98b',
     borderwidth:1,borderpad:4}]},BG),CFG);}
 bars('c_mstrat',D.mstrat,'Strategy monthly P&L - one slot, no account rule','P&L $');
-bars('c_mbook',D.mbook,'Book monthly P&L - cash withdrawn plus live equity','P&L $');
+bars('c_mbook',D.mbook,'Book monthly P&L - cash plus safely withdrawable surplus','P&L $');
 function tbl(id,rows,cols,hdr){document.getElementById(id).innerHTML=
  '<table><thead><tr>'+hdr.map(c=>'<th>'+c+'</th>').join('')+'</tr></thead><tbody>'+
  rows.map(r=>'<tr>'+cols.map(c=>{let v=r[c];if(v==null)v='';
   if(typeof v==='number')v=v.toLocaleString();
   return `<td>${v}</td>`;}).join('')+'</tr>').join('')+'</tbody></table>';}
-tbl('t_keep',D.robust,['policy','withdraw','below_water','worst','collapse_rate',
- 'worst_wipe','wipeout_rate','ruin_rate','blowups','drawn_median','cash_median',
- 'equity_median','net_p10','net_median','seats_median'],
- ['policy','withdraws','ended BELOW what you put in','worst window net $',
-  'windows that lost a REAL book (5+ seats)','biggest book lost (seats)',
-  'windows that hit zero seats','ruin rate','blowups (median)',
-  'total withdrawn (median) $','cash IN HAND (median) $',
-  'equity left (median) $','net p10 $','net MEDIAN $','seats bought (median)']);
+tbl('t_keep',D.robust,['policy','withdraw','cashout_below_water','cashout_worst',
+ 'shock_rate','full_collapse_rate','worst_cluster','worst_wipe','wipeout_rate',
+ 'ruin_rate','blowups','drawn_median','cash_median','withdrawable_median',
+ 'cashout_p10','cashout_median','equity_median','mark_median','seats_median'],
+ ['policy','withdraws','cashout below capital','worst cashout $',
+  'windows with a 5+ seat shock','windows with full 5+ seat extinction',
+  'biggest same-trade shock','biggest whole book lost','windows that hit zero seats',
+  'ruin rate','blowups (median)','payout received (median) $','cash in pot (median) $',
+  'safe endpoint payout (median) $','cashout p10 $','cashout median $',
+  'optimistic prop credit $','mark-to-model median $','seats bought (median)']);
 tbl('t_pick',D.pick,['want','policy','why'],
  ['if what you care about is...','then take','the numbers behind it']);
 tbl('t_rec',D.rec,['metric','sim','mt5'],['metric','this simulation','MT5 run']);
 document.getElementById('foot').textContent=
- `code ${D.git} · generated ${D.gen} · measured on 2020-2026. RR and the window set are `+
- `EA defaults, not fitted, but the window design still came from looking at this history. `+
+ `code ${D.git} · generated ${D.gen} · sample ${D.date_label} · RR ${D.rr} · `+
+ `${D.window_label}. RR and the default window set were not fitted here, but the window `+
+ `design still came from looking at this history. `+
  `The withdrawal level is a real free parameter and should be validated out-of-sample `+
  `before it is trusted.`;
 </script></body></html>"""
@@ -976,8 +1194,13 @@ def build_html(payload):
     html = (_TPL.replace("__PLOTLYJS__", po.get_plotlyjs())
             .replace("__RRV__", f"{payload['rr']:g}")
             .replace("__DDV__", f"{payload['dd_limit']:,.0f}")
-            .replace("__COSTV__", f"{payload['cost']:,.0f}")
-            .replace("__COMMV__", f"{COMMISSION_ROUNDTURN:.2f}")
+             .replace("__COSTV__", f"{payload['cost']:,.0f}")
+             .replace("__COMMV__", f"{COMMISSION_ROUNDTURN:.2f}")
+             .replace("__SEEDV__", f"{payload['seed']:,.0f}")
+             .replace("__SPLITV__", f"{payload['split']:.0%}")
+             .replace("__STARTV__", payload["start_policy"])
+             .replace("__WINDOWSV__", payload["window_label"])
+             .replace("__DATEV__", payload["date_label"])
             .replace("__IVLV__", str(payload["interval_days"]))
             .replace("__PATHV__", payload["path_label"])
             .replace("__NWIN__", str(payload["n_windows"]))
@@ -1089,9 +1312,9 @@ never buy another. Any policy on this page that banks nothing behaves the same w
  windows. Click any cell to load it above. Blank cells are combinations where the
  withdrawal is larger than the gain that triggers it, which is the same as withdrawing the
  whole gain &mdash; they duplicate the diagonal and are left out.</div>
- <div class="note"><b>Read the wipeout panel before the money panels.</b> Cash and net both
- rise with how aggressively you withdraw, and so does the chance of losing the whole book;
- a cell that looks best on net may be one you would never actually run.</div></div>
+ <div class="note"><b>Read the shock panel before the money panels.</b> Cashout and risk
+ both change with withdrawal timing; a cell that looks best on money may have synchronized
+ multi-seat losses you would never actually run.</div></div>
 
 <div class="panel" style="overflow:auto" id="t_grid"></div>
 <div class="note" id="foot"></div>
@@ -1102,11 +1325,11 @@ const BG={plot_bgcolor:'#fff',paper_bgcolor:'#fff'};
 const BASE=D.base,DAY=864e5;
 const money=v=>(v<0?'-$':'$')+Math.abs(Math.round(v)).toLocaleString();
 const key=(c,s)=>c+'_'+s;
-let metric='net';
+let metric='cashout';
 const METRICS={
- net:['net, median $','#eef7f0','#15803d'],
- cash:['cash withdrawn, median $','#eef3f9','#2b6cb0'],
- wipe:['windows that lost a real book of 5+ seats %','#fdf1f1','#b91c1c'],
+ cashout:['cashout, median $','#eef7f0','#15803d'],
+ cash:['cash in pot, median $','#eef3f9','#2b6cb0'],
+ shock:['windows with a 5+ seat shock %','#fdf1f1','#b91c1c'],
  blow:['seats liquidated, median','#fdf5ec','#c2760c'],
  seats:['seats bought, median','#f4f1f8','#6b46c1']};
 
@@ -1131,7 +1354,8 @@ function draw(){
    fillcolor:'rgba(78,121,167,.22)'},
   {x:x(b.o),y:b.cash,type:'scatter',mode:'lines',name:'cash withdrawn (cumulative)',
    yaxis:'y2',line:{width:2,color:'#15803d'}},
-  {x:x(b.o),y:b.eq,type:'scatter',mode:'lines',name:'equity in live seats',
+   {x:x(b.o),y:b.eq,type:'scatter',mode:'lines',
+    name:'optimistic positive prop credit',
    yaxis:'y2',line:{width:1.4,color:'#b07aa1',dash:'dot'}}],
   Object.assign({margin:{l:56,r:70,t:28,b:34},font:F,hovermode:'x unified',
    title:{text:`$${ck.toLocaleString()} per $${st.toLocaleString()} gained`,
@@ -1189,19 +1413,19 @@ function draw(){
    title:{text:'Cash withdrawn per year',x:0,font:{size:13}},
    xaxis:{type:'category'},yaxis:{gridcolor:'#eef0f3'}},BG),CFG);
  document.getElementById('stat').innerHTML=
-  `<span>across ${D.nwin} windows &mdash; net median <b>${money(c.net_median)}</b></span>`+
+  `<span>across ${D.nwin} windows &mdash; cashout median <b>${money(c.cashout_median)}</b></span>`+
   `<span>cash <b>${money(c.cash_median)}</b></span>`+
   `<span>equity left <b>${money(c.equity_median)}</b></span>`+
-  `<span>net p10 <b>${money(c.net_p10)}</b></span>`+
-  `<span>lost a book of 5+ seats in <b class="${c.collapse_pct?'bad':'ok'}">`+
-   `${c.collapse_pct}%</b> of windows (biggest lost: ${c.worst_wipe})</span>`+
+  `<span>cashout p10 <b>${money(c.cashout_p10)}</b></span>`+
+  `<span>5+ seat shock in <b class="${c.shock_pct?'bad':'ok'}">`+
+   `${c.shock_pct}%</b> of windows (biggest shock: ${c.worst_cluster})</span>`+
   `<span>blowups <b>${c.blowups}</b></span>`+
   `<span>seats <b>${c.seats_median}</b></span>`;
  const al=document.getElementById('alert');
- if(c.collapse_pct>0){al.style.display='';al.innerHTML=
-   `<b>This rule lost a whole book of ${c.worst_wipe} seats in ${c.collapse_pct}% of windows.</b> `+
-   `It survives on this page only because withdrawn cash could rebuy the book. `+
-   `Whatever the money columns say, that is the number to decide on.`+
+ if(c.shock_pct>0){al.style.display='';al.innerHTML=
+   `<b>This rule lost ${c.worst_cluster} seats on one trade; 5+ seat shocks occurred `+
+   `in ${c.shock_pct}% of windows.</b> Full 5+ seat extinction occurred in `+
+   `${c.full_collapse_pct}% of windows. Treat both as observed sample counts, not forecasts.`+
    (ck===st?` <br>Withdrawing the entire gain that triggers the withdrawal puts every `+
     `frozen seat back on the Safety Net each time, which is strip-to-a-level under `+
     `another name - and that is what synchronises a book into dying all at once. `+
@@ -1246,11 +1470,11 @@ document.getElementById('mbtns').innerHTML=Object.keys(METRICS).map(k=>
  `<button class="mb" data-m="${k}">${METRICS[k][0]}</button>`).join('');
 [...document.querySelectorAll('.mb')].forEach(b=>
  b.onclick=()=>{metric=b.dataset.m;heat();});
-const HDR=['withdraw','per gain of','rate','net MEDIAN $','cash IN HAND $',
- 'equity left $','net p10 $','lost a 5+ seat book %','biggest book lost',
+const HDR=['withdraw','per gain of','rate','cashout MEDIAN $','cash IN HAND $',
+ 'safe endpoint payout $','cashout p10 $','5+ seat shock %','biggest shock',
  'blowups','seats bought'];
-const KEYS=['ck','st','rate','net_median','cash_median','equity_median','net_p10',
- 'collapse_pct','worst_wipe','blowups','seats_median'];
+const KEYS=['ck','st','rate','cashout_median','cash_median','withdrawable_median',
+ 'cashout_p10','shock_pct','worst_cluster','blowups','seats_median'];
 document.getElementById('t_grid').innerHTML='<table><thead><tr>'+
  HDR.map(h=>'<th>'+h+'</th>').join('')+'</tr></thead><tbody>'+
  D.rows.map(r=>`<tr data-k="${key(r.ck,r.st)}" style="cursor:pointer">`+
@@ -1310,6 +1534,9 @@ def main():
                     help="Comma-separated windows, e.g. 9-10,10-11; default: all.")
     ap.add_argument("--start-date", help="Inclusive YYYY-MM-DD filter.")
     ap.add_argument("--end-date", help="Inclusive YYYY-MM-DD filter.")
+    ap.add_argument("--allow-incomplete", action="store_true",
+                    help="diagnostic only: permit missing or tester-truncated "
+                         "window exports (invalid for RR/window comparisons)")
 
     ap.add_argument("--dd", "--dd-limit", dest="dd", type=float, default=2500.0,
                     help="Trailing drawdown. The Safety Net is derived as dd + floor.")
@@ -1375,9 +1602,19 @@ def main():
     st = build_stream(a)
     ex, net, mae, mfe = st["ex"], st["net"], st["mae"], st["mfe"]
     gross = float((net + COMMISSION_ROUNDTURN).sum())
+    mt5_comparable = (
+        a.input_csv is None
+        and Path(a.sweep_root).resolve() == (ROOT / "1_sweeps" / "RR").resolve()
+        and Path(a.stats_root).resolve() == (ROOT / "1_sweeps" / "RR_stats").resolve()
+        and np.isclose(a.rr, 1.0)
+        and a.windows.strip().lower() == "all"
+        and a.start_date is None and a.end_date is None
+        and st["complete"] and set(st["windows"]) == set(CANONICAL_WINDOWS)
+    )
 
     print("=" * 88)
-    print(f"RECONSTRUCTION — all windows at RR {a.rr:g}, one position at a time")
+    print(f"RECONSTRUCTION — {len(st['windows'])} windows at RR {a.rr:g}, "
+          "one position at a time")
     print("=" * 88)
     print(f"  windows merged          {len(st['windows'])}"
           + (f"   (excluded, tester-blown: {', '.join(st['blown'])})"
@@ -1391,13 +1628,18 @@ def main():
           f"correction a plain concatenation misses)")
     print(f"  commission          ${COMMISSION_ROUNDTURN:>10.2f} per round turn"
           f"   (${COMMISSION_ROUNDTURN * len(net):,.0f} total)")
-    print(f"  gross profit        ${gross:>10,.0f}     MT5: ${MT5_REF['gross']:,.0f}"
-          f"   ({100 * gross / MT5_REF['gross'] - 100:+.1f}%)")
-    print(f"  trades               {len(net):>10,}     MT5: {MT5_REF['trades']:,}"
-          f"   ({100 * len(net) / MT5_REF['trades'] - 100:+.1f}%)")
+    if mt5_comparable:
+        print(f"  gross profit        ${gross:>10,.0f}     MT5: ${MT5_REF['gross']:,.0f}"
+              f"   ({100 * gross / MT5_REF['gross'] - 100:+.1f}%)")
+        print(f"  trades               {len(net):>10,}     MT5: {MT5_REF['trades']:,}"
+              f"   ({100 * len(net) / MT5_REF['trades'] - 100:+.1f}%)")
+    else:
+        print(f"  gross profit        ${gross:>10,.0f}     MT5: not comparable")
+        print(f"  trades               {len(net):>10,}     MT5: not comparable")
     print(f"  net after commission ${net.sum():>9,.0f}")
+    mt5_dd = f"${MT5_REF['eq_dd']:,.0f}" if mt5_comparable else "not comparable"
     print(f"  equity DD (MAE-first) ${dd_equity(net, mae, mfe):>8,.0f}     "
-          f"MT5: ${MT5_REF['eq_dd']:,.0f}")
+          f"MT5: {mt5_dd}")
     print(f"  account rule: floor = min(peak - {rule.dd:,.0f}, "
           f"{rule.frozen_floor:,.0f}), Safety Net ${rule.safety_net:,.0f}, "
           f"{a.intratrade_path}")
@@ -1447,16 +1689,10 @@ def main():
           f"quarterly starts, ${cfg.seed:,.0f} seed, a seat every "
           f"{cfg.interval_days}d ({cfg.policy})")
     print("=" * 88)
-    horizon = pd.Timedelta(days=int(365.25 * a.horizon))
-    day_arr = pd.to_datetime(ex)
-    q_starts = []
-    for d in pd.date_range(day_arr[0].normalize(), day_arr[-1], freq="QS"):
-        if d + horizon > day_arr[-1]:
-            break
-        j = int(np.searchsorted(day_arr, d))
-        k = int(np.searchsorted(day_arr, d + horizon))
-        if k - j > 200:
-            q_starts.append((d, j, k))
+    q_starts = robustness_periods(st, a.horizon, min_trades=200)
+    if not q_starts:
+        ap.error("No robustness windows fit the selected date range and --horizon. "
+                 "Use a longer range or a shorter horizon.")
     print(f"  {len(q_starts)} windows, {q_starts[0][0].date()} .. "
           f"{q_starts[-1][0].date()}\n")
 
@@ -1508,22 +1744,35 @@ def main():
 
     def score(c: BookCfg, h: Harvest) -> dict:
         """Run one policy across every window and reduce it to comparable stats."""
-        res = [run_book(ex[j:k], net[j:k], mae[j:k], mfe[j:k], h, rule, c)
-               for _, j, k in q_starts]
-        # `cash` is the pot BALANCE - what is left after seats were rebought out
-        # of it - and it is already net of the split, which run_book applies at
-        # payout. `withdrawn` is the gross total ever taken out, which is a
-        # different and larger number; both are reported rather than conflated.
+        res = [run_book(period["ex"], period["net"], period["mae"], period["mfe"],
+                        h, rule, c)
+               for _, period in q_starts]
+        # `cash` is the pot BALANCE after seat purchases. `withdrawn` is the
+        # cumulative payout actually received after the split; gross_withdrawn
+        # is the prop-side request before the split.
         cashes = np.array([r["cash"] for r in res])
         drawn = np.array([r["withdrawn"] for r in res])
+        gross_drawn = np.array([r["gross_withdrawn"] for r in res])
         # run_book already splits equity, so do not charge it a second time.
         equities = np.array([r["equity"] for r in res])
+        withdrawable = np.array([r["withdrawable"] for r in res])
         # Net has to charge every dollar of the trader's own money, whichever way
         # it went in: `spent` for the subscription, which pays per seat forever,
         # and the seed for the bootstrap, which pays once up front. Leaving the
         # seed out overstated every bootstrap net by exactly one seed.
         nets = (cashes + equities - np.array([r["spent"] for r in res]) - c.seed)
+        cashout_nets = (cashes + withdrawable
+                        - np.array([r["spent"] for r in res]) - c.seed)
+        realized_nets = (cashes - np.array([r["spent"] for r in res]) - c.seed)
         return {
+            "seed": c.seed, "seat_cost": rule.cost, "dd_limit": rule.dd,
+            "frozen_floor": rule.frozen_floor, "payout_split": c.split,
+            "seat_cap": c.seats, "interval_days": c.interval_days,
+            "start_policy": c.policy, "horizon_years": a.horizon,
+            "stream_complete": st["complete"],
+            "stream_windows": len(st["windows"]),
+            "sample_start": str(pd.Timestamp(ex[0]).date()),
+            "sample_end": str(pd.Timestamp(ex[-1]).date()),
             "withdraw": h.label,
             "ruin_rate": "n/a" if c.funding == "external"
                          else f"{np.mean([r['ruined'] for r in res]):.0%}",
@@ -1531,11 +1780,19 @@ def main():
             # count: wipeouts are rare enough per window that a median of 0 hides
             # a policy which loses the whole book several times over a long run.
             "wipeout_rate": f"{np.mean([r['wipeouts'] > 0 for r in res]):.0%}",
-            # The one that matters: a collapse of a real book, not of the single
-            # starter seat every policy holds in its first weeks.
-            "collapse_rate": f"{np.mean([r['worst_wipe'] >= 5 for r in res]):.0%}",
-            "collapse_pct": round(100 * float(np.mean([r["worst_wipe"] >= 5
-                                                       for r in res]))),
+            # A correlated shock matters even when one or two seats survive. Keep
+            # it separate from complete extinction of a 5+ seat book.
+            "shock_rate": f"{np.mean([r['worst_cluster'] >= 5 for r in res]):.0%}",
+            "shock_pct": round(100 * float(np.mean([r["worst_cluster"] >= 5
+                                                     for r in res]))),
+            "full_collapse_rate": f"{np.mean([r['worst_wipe'] >= 5 for r in res]):.0%}",
+            "full_collapse_pct": round(100 * float(np.mean(
+                [r["worst_wipe"] >= 5 for r in res]))),
+            "worst_cluster": int(max(r["worst_cluster"] for r in res)),
+            "worst_cluster_pct": round(100 * max(
+                r["worst_cluster_fraction"] for r in res)),
+            "cluster_events": round(float(np.mean([r["cluster_events"]
+                                                     for r in res])), 2),
             "worst_wipe": int(max(r["worst_wipe"] for r in res)),
             "wipeout_pct": round(100 * float(np.mean([r["wipeouts"] > 0
                                                       for r in res]))),
@@ -1546,56 +1803,77 @@ def main():
             "cash_median": round(np.median(cashes)),
             "cash_p90": round(np.percentile(cashes, 90)),
             "drawn_median": round(np.median(drawn)),
+            "gross_drawn_median": round(np.median(gross_drawn)),
             "equity_median": round(np.median(equities)),
+            "withdrawable_median": round(np.median(withdrawable)),
+            "realized_p10": round(np.percentile(realized_nets, 10)),
+            "realized_median": round(np.median(realized_nets)),
+            "cashout_p10": round(np.percentile(cashout_nets, 10)),
+            "cashout_median": round(np.median(cashout_nets)),
+            "mark_p10": round(np.percentile(nets, 10)),
+            "mark_median": round(np.median(nets)),
             "net_p10": round(np.percentile(nets, 10)),
             "net_median": round(np.median(nets)),
             # The plainest question anyone actually has: how often did I end up
             # with less than I put in? Medians hide this completely.
-            "below_water": f"{np.mean(nets <= 0):.0%}",
-            "worst": round(float(nets.min())),
+            "mark_below_water": f"{np.mean(nets <= 0):.0%}",
+            "cashout_below_water": f"{np.mean(cashout_nets <= 0):.0%}",
+            "cashout_worst": round(float(cashout_nets.min())),
+            "mark_worst": round(float(nets.min())),
             "seats_median": int(np.median([r["bought"] for r in res])),
             "starts_median": int(np.median([r["starts"] for r in res])),
         }
 
     RB = pd.DataFrame([{"policy": label, **score(c, h)}
                        for label, c, h in POLICIES])
-    cols = ["policy", "withdraw", "below_water", "worst", "collapse_rate",
-            "worst_wipe", "wipeout_rate", "ruin_rate", "blowups", "drawn_median",
-            "cash_median", "equity_median", "net_p10", "net_median", "seats_median"]
+    cols = ["policy", "withdraw", "cashout_below_water", "cashout_worst",
+            "shock_rate", "full_collapse_rate", "worst_cluster", "worst_wipe",
+            "wipeout_rate", "ruin_rate", "blowups",
+            "drawn_median", "cash_median", "withdrawable_median",
+            "cashout_p10", "cashout_median", "equity_median", "mark_p10",
+            "mark_median", "seats_median"]
     print(RB[cols].to_string(index=False))
     print("\n  cash_median is the pot BALANCE at the end, net of the split, after seats")
-    print("  were rebought out of it; drawn_median is the GROSS ever withdrawn.")
-    print("  equity_median is still inside live accounts and can be lost — do not add")
+    print("  were rebought out of it; drawn_median is cumulative payout RECEIVED.")
+    print("  equity_median credits positive P&L in every live account, including")
+    print("  accounts not yet payout-eligible. It can be lost — do not add")
     print("  it to cash and call the total profit.")
-    print("  net_* = cash + equity - capital spent, so the subscription is comparable.")
-    print("  wipeout_rate is the share of windows that lost the whole book at least")
-    print("  once; wipeouts is the mean count. blowups is the median seats liquidated.")
+    print("  cashout_* credits only endpoint-withdrawable equity; net_* marks every")
+    print("  live seat's raw P&L and is the less conservative continuation value.")
+    print("  wipeout_rate sees any zero-seat event; full_collapse_rate requires 5+")
+    print("  seats and zero survivors; shock_rate sees 5+ deaths even with survivors.")
+    print("  blowups is the median total seats liquidated in a window.")
 
     BOOT = RB[RB["policy"] != "subscription"].copy()
-    BOOT["_wr"] = BOOT["collapse_rate"].str.rstrip("%").astype(float)
-    best = BOOT.loc[BOOT["cash_median"].idxmax()]
-    # Rank the survivable policies on net, not on realized cash: a policy that
-    # banks less but keeps far more equity alive is not worse, and cash alone is
-    # what crowned the all-in book that wipes out repeatedly. If nothing manages
-    # a clean sweep, say so rather than crowning the least-bad one silently.
-    floor_wr = BOOT["_wr"].min()
-    cand = BOOT[BOOT["_wr"] == floor_wr]
-    safest = cand.loc[cand["net_median"].idxmax()]
-    safe_label = ("best net, never lost a book" if floor_wr == 0 else
-                  f"best net at the lowest collapse rate seen "
-                  f"({safest['collapse_rate']})")
+    BOOT["_shock"] = BOOT["shock_rate"].str.rstrip("%").astype(float)
+    BOOT["_wipe"] = BOOT["wipeout_rate"].str.rstrip("%").astype(float)
+    BOOT["_ruin"] = BOOT["ruin_rate"].str.rstrip("%").astype(float)
+    best = BOOT.loc[BOOT["realized_median"].idxmax()]
+    # An observed-sample, risk-first pick — not a claim of safety. First minimize
+    # 5+ seat shocks, then ruin, then maximize the cashable p10 outcome.
+    floor_shock = BOOT["_shock"].min()
+    cand = BOOT[BOOT["_shock"] == floor_shock]
+    floor_wipe = cand["_wipe"].min()
+    cand = cand[cand["_wipe"] == floor_wipe]
+    floor_ruin = cand["_ruin"].min()
+    cand = cand[cand["_ruin"] == floor_ruin]
+    risk_pick = cand.sort_values(["cashout_p10", "cashout_median"],
+                                 ascending=False).iloc[0]
+    risk_label = (f"risk-first observed pick ({risk_pick['shock_rate']} 5+ shock, "
+                  f"{risk_pick['wipeout_rate']} any wipeout, {risk_pick['ruin_rate']} ruin)")
     sub = RB[RB["policy"] == "subscription"].iloc[0]
     print(f"\n  MODE 1 subscription      spent ${sub['spent']:,.0f}, "
-          f"equity ${sub['equity_median']:,.0f}, net ${sub['net_median']:,.0f} "
+          f"cashout ${sub['cashout_median']:,.0f}, mark ${sub['mark_median']:,.0f} "
           f"median, {sub['blowups']} blowups, wipeouts in {sub['wipeout_rate']} "
           f"of windows")
     print(f"  MODE 2 best cash in hand {best['policy']} -> "
-          f"${best['cash_median']:,.0f} in hand (${best['drawn_median']:,.0f} gross "
-          f"withdrawn), lost a {best['worst_wipe']}-seat book in "
-          f"{best['collapse_rate']} of windows")
-    print(f"  MODE 2 {safe_label}  {safest['policy']} -> "
-          f"net ${safest['net_median']:,.0f} (${safest['cash_median']:,.0f} of it in "
-          f"hand), ruin {safest['ruin_rate']}, {safest['blowups']} blowups")
+          f"${best['cash_median']:,.0f} in hand (${best['drawn_median']:,.0f} "
+          f"received), worst same-trade shock {best['worst_cluster']} seats; "
+          f"5+ shocks in {best['shock_rate']} of windows")
+    print(f"  MODE 2 {risk_label}  {risk_pick['policy']} -> "
+          f"cashout ${risk_pick['cashout_median']:,.0f} "
+          f"(p10 ${risk_pick['cashout_p10']:,.0f}; ${risk_pick['cash_median']:,.0f} "
+          f"already in hand), {risk_pick['blowups']} blowups")
 
     RESULTS.mkdir(exist_ok=True)
     S.to_csv(RESULTS / "farming_starts.csv", index=False)
@@ -1609,10 +1887,10 @@ def main():
         return run_book(ex, net, mae, mfe, h, rule, c, trace=True)
 
     sub_bk = full_run("subscription")
-    bk = full_run(safest["policy"])
+    bk = full_run(risk_pick["policy"])
     # Every bootstrap policy also gets a full-period run so the report can switch
     # between them. This is the expensive part of the script.
-    boot_runs = {label: (bk if label == safest["policy"] else full_run(label))
+    boot_runs = {label: (bk if label == risk_pick["policy"] else full_run(label))
                  for label, c, _ in POLICIES if c.funding == "cash"}
 
     def seat_table(b):
@@ -1622,9 +1900,11 @@ def main():
             "end_date": s.get("end").date() if s.get("end") is not None else None,
             "status": "alive" if s["alive"] else "blown",
             "reached_safety_net": s["frozen"],
-            "banked": round(s["banked"]),
-            "equity_at_end": round(s["eq"]),
-            "value": round(s["banked"] + (s["eq"] if s["alive"] else 0.0)),
+            "gross_prop_payout": round(s["banked"]),
+            "payout_received": round(s["banked"] * cfg.split),
+            "raw_prop_pnl_at_end": round(s["eq"]),
+            "optimistic_positive_prop_credit": round(
+                max(0.0, s["eq"]) * cfg.split if s["alive"] else 0.0),
         } for i, s in enumerate(sorted(b["seats"], key=lambda x: x["start"]))])
 
     seat_table(bk).to_csv(RESULTS / "farming_book_seats.csv", index=False)
@@ -1638,14 +1918,17 @@ def main():
     print("THE TWO MODES OVER THE WHOLE PERIOD (one path each, not an expectation)")
     print("=" * 88)
     for name, b in (("MODE 1  subscription", sub_bk),
-                    (f"MODE 2  {safest['policy'].replace('bootstrap · ', '')}", bk)):
+                    (f"MODE 2  {risk_pick['policy'].replace('bootstrap · ', '')}", bk)):
         print(f"  {name}")
         print(f"    seats bought {b['bought']:>4} on {b['starts']:>3} distinct dates   "
               f"blowups {b['deaths']:>4}   full wipeouts {b['wipeouts']}   "
               f"alive at end {b['live']}")
         print(f"    own capital spent ${b['spent']:>9,.0f}   "
-              f"cash withdrawn ${b['withdrawn']:>9,.0f}   "
-              f"equity left ${b['equity']:>9,.0f}   net ${b['wealth']:>9,.0f}")
+              f"payout received ${b['withdrawn']:>9,.0f}   "
+              f"safe endpoint payout ${b['withdrawable']:>9,.0f}")
+        print(f"    realized ${b['realized_wealth']:>9,.0f}   "
+              f"cashout ${b['cashout_wealth']:>9,.0f}   "
+              f"optimistic mark ${b['wealth']:>9,.0f}")
 
     # Seats bought on the same trade are not merely similar, they are identical:
     # same rule, same stream, same withdrawal level, so the paths coincide to the
@@ -1677,18 +1960,28 @@ def main():
             "live": [int(v) for v in ds["live"]],
             "cash": [round(float(v)) for v in ds["withdrawn"]],
             "hand": [round(float(v)) for v in ds["cash"]],
+            "raw_prop_pnl": [round(float(v)) for v in ds["raw_prop_pnl"]],
             "equity": [round(float(v)) for v in ds["equity"]],
+            "withdrawable": [round(float(v)) for v in ds["withdrawable"]],
             "year_x": [str(i) for i in yr.index],
             "year_y": [float(v) for v in yr],
             "curves": curves,
             "bought": b["bought"], "starts": b["starts"],
-            "deaths": b["deaths"], "wipeouts": b["wipeouts"], "live_end": b["live"],
+            "deaths": b["deaths"], "wipeouts": b["wipeouts"],
+            "worst_cluster": b["worst_cluster"],
+            "cluster_events": b["cluster_events"], "live_end": b["live"],
             "final_cash": round(b["cash"]), "final_equity": round(b["equity"]),
+            "final_withdrawable": round(b["withdrawable"]),
             "withdrawn": round(b["withdrawn"]),
-            "spent_total": round(b["spent"]), "net": round(b["wealth"]),
+            "spent_total": round(b["spent"]),
+            "realized": round(b["realized_wealth"]),
+            "cashout_final": round(b["cashout_wealth"]),
+            "net": round(b["wealth"]),
         }
         if full:
             out["wealth"] = [round(float(v)) for v in ds["wealth"]]
+            out["cashout"] = [round(float(v)) for v in ds["cashout_wealth"]]
+            out["realized_path"] = [round(float(v)) for v in ds["realized_wealth"]]
             out["spent"] = [round(float(v)) for v in ds["spent"]]
         return out
 
@@ -1698,7 +1991,8 @@ def main():
         dd_closed=("dd_closed", "min"), dd_float=("dd_float", "min")).reset_index()
 
     m_strat = monthly(ex, net, cumulative=False)
-    m_book = monthly(bk["series"]["day"], bk["series"]["wealth"].values, cumulative=True)
+    m_book = monthly(bk["series"]["day"], bk["series"]["cashout_wealth"].values,
+                     cumulative=True)
 
     def bar_payload(m):
         wins = int((m > 0).sum())
@@ -1773,14 +2067,20 @@ def main():
                 rows.append({"ck": ck, "st": st_,
                              "rate": round(100 * ck / st_), **stats})
         G = pd.DataFrame(rows)
-        best_cell = G.loc[G[G["collapse_pct"] == 0]["net_median"].idxmax()] \
-            if (G["collapse_pct"] == 0).any() else G.loc[G["net_median"].idxmax()]
-        print(G[["ck", "st", "rate", "collapse_pct", "worst_wipe", "blowups",
-                 "cash_median", "equity_median", "net_p10", "net_median",
+        clean_grid = G[G["shock_pct"] == 0]
+        best_cell = G.loc[clean_grid["cashout_p10"].idxmax()] \
+            if len(clean_grid) else G.loc[G["cashout_p10"].idxmax()]
+        best_cell_label = ("best cashout p10 among rules with no observed 5+ seat shock"
+                           if len(clean_grid) else
+                           "no grid rule avoided a 5+ seat shock; best cashout p10 overall")
+        print(G[["ck", "st", "rate", "shock_pct", "full_collapse_pct",
+                 "worst_cluster", "blowups", "cash_median", "withdrawable_median",
+                 "cashout_p10", "cashout_median", "mark_median",
                  "seats_median"]].to_string(index=False))
-        print(f"\n  best net that never lost a book: ${best_cell['ck']:,.0f} "
+        print(f"\n  {best_cell_label}: "
+              f"${best_cell['ck']:,.0f} "
               f"per ${best_cell['st']:,.0f} ({best_cell['rate']:.0f}%) -> "
-              f"net ${best_cell['net_median']:,.0f}, "
+              f"cashout ${best_cell['cashout_median']:,.0f}, "
               f"cash ${best_cell['cash_median']:,.0f}")
 
         def matrix(col):
@@ -1802,56 +2102,61 @@ def main():
             "chunks": [int(c) for c in CHUNKS], "steps": [int(s) for s in STEPS],
             "def_ck": int(best_cell["ck"]), "def_st": int(best_cell["st"]),
             "cells": cells, "rows": rows,
-            "heat": {"net": matrix("net_median"), "cash": matrix("cash_median"),
-                     "wipe": matrix("collapse_pct"), "blow": matrix("blowups"),
+            "heat": {"cashout": matrix("cashout_median"),
+                     "cash": matrix("cash_median"),
+                     "shock": matrix("shock_pct"), "blow": matrix("blowups"),
                      "seats": matrix("seats_median")},
-            "txt": {"net": texts("net_median", "{:,.0f}"),
+            "txt": {"cashout": texts("cashout_median", "{:,.0f}"),
                     "cash": texts("cash_median", "{:,.0f}"),
-                    "wipe": texts("collapse_pct", "{:.0f}%"),
+                    "shock": texts("shock_pct", "{:.0f}%"),
                     "blow": texts("blowups", "{:.0f}"),
                     "seats": texts("seats_median", "{:.0f}")},
         })
 
     short = lambda s: s.replace("bootstrap · ", "")
     sub_pl = book_payload(sub_bk, "subscription", full=True)
-    boot_pl = book_payload(bk, short(safest["policy"]), full=True)
+    boot_pl = book_payload(bk, short(risk_pick["policy"]), full=True)
 
     def bar_colour(r):
         if r["policy"] == "subscription":
             return "#6b7280"
-        return "#59a14f" if r["collapse_rate"] == "0%" else "#e15759"
+        return "#59a14f" if r["shock_rate"] == "0%" else "#e15759"
 
     RBi = RB.set_index("policy")
     books, default_i = [], 0
     for label, b in boot_runs.items():
-        if label == safest["policy"]:
+        if label == risk_pick["policy"]:
             default_i = len(books)
         pl = book_payload(b, short(label))
         pl["colour"] = bar_colour(RBi.loc[label].to_dict() | {"policy": label})
         books.append(pl)
 
-    # A policy is dominated when another beats it on BOTH the typical outcome and
-    # the bad case. Those can be dropped without knowing anyone's risk appetite,
-    # which is the only part of this choice the data can settle on its own.
-    pts = RB[["policy", "net_median", "net_p10"]].to_dict("records")
+    # Two-axis dominance is descriptive only: timing, ruin, and shock exposure are
+    # not on this chart, so a hollow point is not universally irrational.
+    pts = RB[["policy", "cashout_median", "cashout_p10"]].to_dict("records")
     for p in pts:
         p["dominated"] = any(
-            q["net_median"] >= p["net_median"] and q["net_p10"] >= p["net_p10"]
-            and (q["net_median"] > p["net_median"] or q["net_p10"] > p["net_p10"])
+            q["cashout_median"] >= p["cashout_median"]
+            and q["cashout_p10"] >= p["cashout_p10"]
+            and (q["cashout_median"] > p["cashout_median"]
+                 or q["cashout_p10"] > p["cashout_p10"])
             for q in pts)
     dom = {p["policy"]: p["dominated"] for p in pts}
-    front = sorted((p for p in pts if not p["dominated"]), key=lambda p: p["net_p10"])
+    front = sorted((p for p in pts if not p["dominated"]),
+                   key=lambda p: p["cashout_p10"])
 
     R = RB.set_index("policy")
 
     def info(label):
         r = R.loc[label]
         return [short(label),
-                f"net median {r['net_median']:,.0f} · net p10 {r['net_p10']:,.0f}<br>"
-                f"banked {r['cash_median']:,.0f} · equity {r['equity_median']:,.0f}<br>"
-                f"wipeouts in {r['wipeout_rate']} of windows · "
+                f"cashout median {r['cashout_median']:,.0f} · "
+                f"cashout p10 {r['cashout_p10']:,.0f}<br>"
+                f"cash pot {r['cash_median']:,.0f} · safe endpoint payout "
+                f"{r['withdrawable_median']:,.0f}<br>"
+                f"5+ shock in {r['shock_rate']} of windows · "
                 f"{r['blowups']} blowups<br>"
-                + ("DOMINATED - another policy beats it on both"
+                + ("DOMINATED ON THESE TWO CASHOUT AXES"
                    if dom[label] else "on the frontier")]
 
     # The chooser: each row is a constraint someone might actually have, and the
@@ -1865,32 +2170,39 @@ def main():
         return {"want": want, "policy": short(r["policy"]),
                 "why": fmt.format(**r), "_p": r["policy"]}
 
-    clean = RB["collapse_rate"] == "0%"
+    clean = RB["shock_rate"] == "0%"
     is_boot = RB["policy"] != "subscription"
     PICKS = [p for p in (
-        pick(clean & is_boot, "net_median",
-             "never losing the whole book, best overall",
-             None, "net ${net_median:,.0f} median · ${cash_median:,.0f} of it in hand "
-                   "· p10 ${net_p10:,.0f} · {blowups} blowups"),
+        pick(clean & is_boot, "cashout_median",
+             "no observed 5+ seat shock, best cashable median",
+             None, "cashout ${cashout_median:,.0f} median · p10 "
+                   "${cashout_p10:,.0f} · {blowups} blowups"),
         pick(clean & is_boot, "cash_median",
              "cash in hand rather than equity at risk",
-             None, "${cash_median:,.0f} in hand of ${drawn_median:,.0f} ever "
-                   "withdrawn · net ${net_median:,.0f} · p10 ${net_p10:,.0f}"),
-        pick(is_boot, "net_p10", "the best bad case, whatever the upside",
-             None, "p10 ${net_p10:,.0f} · net ${net_median:,.0f} median · "
-                   "wipeouts in {wipeout_rate} of windows"),
-        pick(is_boot, "net_median", "the highest typical outcome, accepting wipeouts",
-             None, "net ${net_median:,.0f} median but p10 ${net_p10:,.0f} · "
-                   "wipeouts in {wipeout_rate} of windows · ruin {ruin_rate}"),
-        pick(~is_boot, "net_median", "not touching withdrawn money at all (mode 1)",
-             None, "net ${net_median:,.0f} median, all unrealized · "
-                   "${spent:,.0f} of own capital · {blowups} blowups"),
+             None, "${cash_median:,.0f} in pot of ${drawn_median:,.0f} received · "
+                   "cashout ${cashout_median:,.0f} · p10 ${cashout_p10:,.0f}"),
+        pick(is_boot, "cashout_p10", "the best cashable bad case",
+             None, "p10 ${cashout_p10:,.0f} · cashout ${cashout_median:,.0f} "
+                   "median · 5+ shock in {shock_rate}"),
+        pick(is_boot, "cashout_median", "the highest cashable typical outcome",
+             None, "cashout ${cashout_median:,.0f} median but p10 "
+                   "${cashout_p10:,.0f} · ruin {ruin_rate}"),
+        pick(~is_boot, "cashout_median", "mode 1 benchmark (external funding)",
+             None, "cashout ${cashout_median:,.0f} median · mark-to-model "
+                   "${mark_median:,.0f} · ${spent:,.0f} own capital"),
     ) if p]
 
     build_html({
         "rr": a.rr, "dd_limit": rule.dd, "cost": rule.cost,
         "frozen_floor": rule.frozen_floor, "safety": rule.safety_net,
         "interval_days": cfg.interval_days, "path_label": a.intratrade_path,
+        "seed": cfg.seed, "split": cfg.split, "start_policy": cfg.policy,
+        "window_label": (
+            "all 23 windows" if st["complete"] and len(st["windows"]) == 23
+            else (f"complete requested subset ({len(st['windows'])} windows)"
+                  if st["complete"]
+                  else f"{len(st['windows'])} windows (diagnostic/incomplete)")),
+        "date_label": f"{pd.Timestamp(ex[0]).date()} to {pd.Timestamp(ex[-1]).date()}",
         "horizon": a.horizon, "n_windows": len(q_starts),
         "cards": [
             ["reaches Safety Net", f"{FULL['frozen'].mean():.0%}", "ok",
@@ -1898,17 +2210,18 @@ def main():
             ["median days to get there", f"{med:.0f}", "",
              f"p25 {okS['days_to_freeze'].quantile(.25):.0f} / "
              f"p75 {okS['days_to_freeze'].quantile(.75):.0f}"],
-            ["mode 1 · net", f"${sub['net_median']:,.0f}", "",
-             f"all unrealized · ${sub['spent']:,.0f} own capital · "
-             f"{sub['blowups']} blowups"],
+            ["mode 1 · cashout benchmark", f"${sub['cashout_median']:,.0f}", "",
+             f"mark-to-model ${sub['mark_median']:,.0f} · "
+             f"${sub['spent']:,.0f} own capital · {sub['blowups']} blowups"],
             ["mode 2 · most cash in hand, any risk", f"${best['cash_median']:,.0f}",
-             "bad" if best["collapse_rate"] != "0%" else "ok",
-             f"{best['policy'].replace('bootstrap · ', '')} · lost a book of "
-             f"{best['worst_wipe']} seats in {best['collapse_rate']} of windows"],
-            [f"mode 2 · {safe_label}", f"${safest['net_median']:,.0f}",
-             "ok" if safest["collapse_rate"] == "0%" else "bad",
-             f"{boot_pl['name']} · ${safest['cash_median']:,.0f} in hand · "
-             f"{safest['blowups']} blowups"],
+             "bad" if best["shock_rate"] != "0%" else "ok",
+             f"{best['policy'].replace('bootstrap · ', '')} · worst shock "
+             f"{best['worst_cluster']} seats · 5+ shock in {best['shock_rate']}"],
+            ["mode 2 · risk-first observed pick",
+             f"${risk_pick['cashout_median']:,.0f}",
+             "ok" if risk_pick["shock_rate"] == "0%" else "bad",
+             f"{boot_pl['name']} · p10 ${risk_pick['cashout_p10']:,.0f} · "
+             f"ruin {risk_pick['ruin_rate']} · {risk_pick['blowups']} blowups"],
             ["seat cap", str(cfg.seats), "", "firm rule, not a maths question"],
         ],
         "sub": sub_pl,
@@ -1916,8 +2229,8 @@ def main():
         "books": books,
         "book_default": default_i,
         "front": {
-            "x": [int(r["net_p10"]) for r in RB.to_dict("records")],
-            "y": [int(r["net_median"]) for r in RB.to_dict("records")],
+            "x": [int(r["cashout_p10"]) for r in RB.to_dict("records")],
+            "y": [int(r["cashout_median"]) for r in RB.to_dict("records")],
             # Only the frontier gets a printed label; the dominated cluster in the
             # middle is unreadable with fifteen captions on top of each other, and
             # those are the points you are meant to be ignoring anyway.
@@ -1932,8 +2245,8 @@ def main():
             "symbol": ["square" if r["policy"] == "subscription" else "circle"
                        for r in RB.to_dict("records")],
             "info": [info(r["policy"]) for r in RB.to_dict("records")],
-            "fx": [int(p["net_p10"]) for p in front],
-            "fy": [int(p["net_median"]) for p in front],
+            "fx": [int(p["cashout_p10"]) for p in front],
+            "fy": [int(p["cashout_median"]) for p in front],
         },
         "pick": PICKS,
         "starts": {"okx": [str(d) for d in okS["start"]],
@@ -1954,19 +2267,23 @@ def main():
             "hi": [int(h - m) for h, m in zip(RB["cash_p90"], RB["cash_median"])],
             "lo": [int(m - l) for m, l in zip(RB["cash_median"], RB["cash_p10"])],
             "colour": [bar_colour(r) for r in RB.to_dict("records")],
-            "sub": [f"withdraws {r['withdraw']} · {r['wipeouts']:g} wipeouts · "
-                    f"ruin {r['ruin_rate']} · equity left "
-                    f"${r['equity_median']:,.0f}" for r in RB.to_dict("records")],
+            "sub": [f"withdraws {r['withdraw']} · 5+ shock {r['shock_rate']} · "
+                    f"ruin {r['ruin_rate']} · safe endpoint payout "
+                    f"${r['withdrawable_median']:,.0f}" for r in RB.to_dict("records")],
         },
         "robust": RB.to_dict("records"),
         "mstrat": bar_payload(m_strat),
         "mbook": bar_payload(m_book),
         "rec": [
-            {"metric": "trades", "sim": f"{len(net):,}", "mt5": f"{MT5_REF['trades']:,}"},
+            {"metric": "trades", "sim": f"{len(net):,}",
+             "mt5": (f"{MT5_REF['trades']:,}" if mt5_comparable
+                     else "not comparable")},
             {"metric": "gross profit", "sim": f"${gross:,.0f}",
-             "mt5": f"${MT5_REF['gross']:,.0f}"},
+             "mt5": (f"${MT5_REF['gross']:,.0f}" if mt5_comparable
+                     else "not comparable")},
             {"metric": "equity drawdown", "sim": f"${dd_equity(net, mae, mfe):,.0f}",
-             "mt5": f"${MT5_REF['eq_dd']:,.0f}"},
+             "mt5": (f"${MT5_REF['eq_dd']:,.0f}" if mt5_comparable
+                     else "not comparable")},
             {"metric": "windows merged", "sim": f"{len(st['windows'])}",
              "mt5": (f"{len(st['windows']) + len(st['blown'])} "
                      f"({len(st['blown'])} dropped: {', '.join(st['blown'])})"
