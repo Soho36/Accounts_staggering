@@ -37,7 +37,7 @@ per-account simulation does not model:
 1. **Single-position replay.** The EA holds one position at a time, so with every
    hourly window enabled they compete for one slot. Each sweep file was generated
    with only its own window active, so concatenating them counts entries that could
-   never have been taken — **3,109 of 11,754 (26%)** on this data. The old script
+   never have been taken — **3,359 of 12,658 (27%)** on this data. The old script
    printed a warning; this one replays the merged stream and drops the blocked
    entries, so there is nothing left to warn about.
 2. **Withdrawals as seed capital.** Once the trailing drawdown freezes, the floor is
@@ -67,35 +67,61 @@ equity drawdown exactly). **`mfe-first` is the conservative case, not the optimi
 it lifts the peak — and therefore the floor — before the adverse excursion is tested
 against it, so the floor is always at least as high and liquidation always at least as
 likely. A higher floor is less cushion, never more. On this data the two orderings give
-almost identical results (87.5% vs 87.3% freeze rate, identical book outcomes).
+near-identical results on this data (the freeze rates differed by 0.2pp on the 22-window
+set; the ordering, not the magnitude, is the point).
 
 Commission is hardcoded at **$1.05 round turn** (`COMMISSION_ROUNDTURN`) — it is the
 broker's real figure, not a tuning knob. The seventh column in the sweep exports is *not*
 a commission, so it is preserved as `Extra` and ignored.
 
+## ⚠ All figures were restated on 2026-08-13
+
+Every number in this file before that date was computed on **22 windows instead of 23**.
+`pass_is_blown()` flagged a pass as tester-liquidated when its `equity_dd` reached 95% of
+the $5,000 deposit. Window `16-17` drew down $4,774 — above that line — while completing
+all 904 trades and finishing at −$426. It was never liquidated; the filter was simply
+wrong, and it silently dropped a valid window from every study in the project.
+
+`16-17` happens to be the most volatile window in the set, so restoring it moves things a
+long way:
+
+| | 22 windows (old, wrong) | **23 windows (correct)** |
+|---|---|---|
+| trades | 8,645 | 9,299 |
+| net after commission | $31,118 | **$27,683** |
+| max floating drawdown | $5,676 | **$6,567** |
+| a seat reaches the Safety Net | 87.5% | **75.8%** |
+| fresh seat, 1-year liquidation | 24.5% | **44.6%** |
+
+The direction of every conclusion survived. Several magnitudes did not. The fix is in
+`pass_is_blown`: only a wiped-out account (`net_profit <= -95% of deposit`) truncates an
+export; a large drawdown does not.
+
 ## What has been established so far
 
-Measured on RR strategy, all windows, RR 1.0, 2020-2026, $2,500 trailing DD, $200 per
-seat, $1.05 round turn, a new seat every 30 days.
+Measured on RR strategy, **all 23 windows**, RR 1.0, 2020-2026, $2,500 trailing DD, $200
+per seat, $1.05 round turn, a new seat every 30 days.
 
-- **A seat reaches the Safety Net 87.5%** of the time (starts with a full year of
-  runway), median **175 days**. Only 12.5% die before ever freezing.
+- **A seat reaches the Safety Net 75.8%** of the time (starts with a full year of runway),
+  median **142 days**. **24.2% die before ever freezing.**
 - **Do not harvest as hard as the rules allow.** An earlier note here said the opposite —
-  that stripping seats to the Safety Net beat every softer level. It does maximise
-  realized cash, but it also synchronises the book and wipes it out in 33–50% of windows.
-  Withdrawing a share of gains earns more *net* with no wipeouts at all. See below.
+  that stripping seats to the Safety Net beat every softer level. It does maximise realized
+  cash, but it also synchronises the book: it loses a book of 5+ seats in **28–83%** of
+  windows, against **0%** for every ratchet rate tested.
 - **Never withdrawing earns nothing withdrawable**, no matter how well it trades — under
   bootstrap funding it can never afford a second seat (median 6 seats, $0 cash).
+- **$1,200 of seed is no longer enough.** With 23 windows the bootstrap's ruin rate at that
+  seed is **17%**, not 0%, and net p10 is −$1,200 — you lose the whole stake in the bottom
+  decile. Ruin only reaches 0% at a **$3,000** seed. See the seed table below.
 - **Per seat-year, measured per start date: median $622, mean $1,513** (starts with a full
   year of runway). This is the policy-independent version and the one to quote.
 
   Do **not** quote a book-level seat-year figure. It is not a property of the strategy, it
-  is a property of whichever policy you featured: the all-in book gives $4,780/seat-year
-  (160 seats over 118.7 seat-years) and the `$200 per $400` book gives $21,890 (35 seats
-  over 23.0 seat-years) on the *same data*, because a policy that keeps its seats alive
-  concentrates the same profit into far fewer seat-years. Earlier notes here quoted $3,850
-  and then $4,780 without stating the denominator; both were book-level and neither is
-  comparable to anything.
+  is a property of whichever policy you featured — a policy that keeps its seats alive
+  concentrates the same profit into far fewer seat-years, so the same data yields anything
+  from $4,780 to $21,890 depending on which book you point at. Earlier notes here quoted
+  $3,850 and then $4,780 without stating the denominator; neither is comparable to
+  anything.
 
   For context, the per-window RR-tuned allocation this project split off from returned
   ≈ $778 per seat-year — that figure comes from the source project and has not been
@@ -154,31 +180,34 @@ needs a live seat. `--seed 100` used to produce a silent run of zeroes flagged "
 it now errors out and says why.
 
 So **`--seed 200` is the purest bootstrap** — one seat of your own money, every seat after
-it paid for out of profit. It works, and on the full sample it turned $200 into 28 seats
-and $455k. But that is one path. Swept across the 18 windows at `$200 per $400`:
+it paid for out of profit. Swept across the 18 windows at `$200 per $400`:
 
-| seed | ruin rate | wipeout rate | net p10 | net median | seats |
+| seed | ruin rate | collapse rate | net p10 | net median | seats |
 |---|---|---|---|---|---|
-| $200 | **39%** | 39% | −$200 | $17,649 | 10 |
-| $400 | 28% | 28% | −$400 | $37,596 | 16 |
-| $600 | 22% | 22% | −$600 | $47,920 | 17 |
-| $800 | 6% | 6% | $2,264 | $67,849 | 19 |
-| $1,000 | 6% | 6% | $2,184 | $68,410 | 20 |
-| $1,200 | **0%** | 0% | $5,043 | $68,410 | 21 |
-| $2,000 | 0% | 0% | $6,163 | $68,410 | 23 |
-| $4,000 | 0% | 0% | $7,775 | $68,410 | 24 |
+| $200 | **39%** | 44% | −$200 | $21,230 | 13 |
+| $400 | 33% | 44% | −$400 | $32,481 | 16 |
+| $600 | 28% | 39% | −$600 | $42,248 | 17 |
+| $800 | 22% | 39% | −$800 | $58,909 | 20 |
+| $1,000 | 22% | 39% | −$1,000 | $61,418 | 20 |
+| **$1,200 (default)** | **17%** | 33% | **−$1,200** | $62,638 | 21 |
+| $2,000 | 11% | 33% | −$376 | $62,638 | 23 |
+| **$3,000** | **0%** | 28% | **+$4,707** | $62,638 | 24 |
+| $4,000 | 0% | 28% | +$5,234 | $62,638 | 24 |
 
-Starting from a single seat loses everything in **39%** of windows, and the p10 outcome is
-losing the whole stake. The direct cause: **21% of possible start dates give a seat that
-dies without ever paying out $200**, and from a one-seat book that is game over on the spot.
-The rest is gambler's ruin on a very thin buffer.
+**The default seed is no longer safe.** On the correct 23 windows, $1,200 leaves a 17%
+ruin rate and a p10 of −$1,200 — the bottom decile loses the entire stake. Ruin only
+reaches zero at **$3,000**, which is also where p10 first turns positive.
+
+The direct cause: **31.6% of possible start dates give a seat that dies without ever paying
+out $200** (it was 21% on the 22-window data), and from a one-seat book that is game over
+on the spot.
 
 Note where the curve flattens. Median net is identical from $1,200 upward — **extra seed
-buys no upside at all, only survival**. It moves the p10 from −$200 to about $7,800 and the
-ruin rate from 39% to 0%, and does nothing to the typical outcome. The inherited $1,200
-default happens to sit exactly where ruin reaches zero on this sample, which is a
-coincidence worth distrusting rather than a result: it is fitted to these 18 overlapping
-windows like everything else here.
+buys no upside at all, only survival**. It moves p10 from −$1,200 to +$5,234 and ruin from
+17% to 0%, and does nothing to the typical outcome. Seed is insurance, not fuel. The
+inherited $1,200 default looked like it sat exactly at the zero-ruin point on the 22-window
+data; that was an artefact of the missing window, which is a good illustration of why a
+parameter that lands suspiciously well deserves suspicion rather than confidence.
 
 ### Why a book dies all at once, and what actually fixes it
 
@@ -197,32 +226,37 @@ That is visible in the numbers. Buying one seat at a time is *not* sufficient on
 Counting *any* drop to zero seats conflates that with the single starter seat dying in the
 first weeks, which nearly every policy does once and which is not the same event.
 
-| policy | collapse rate | biggest book lost | blowups | cash in hand | net median |
-|---|---|---|---|---|---|
-| all-in, strip to net | **50%** | **20** | 20 | $113,462 | $147,894 |
-| 1/interval, strip to net | **28%** | **19** | 10 | $35,345 | $46,189 |
-| 1/interval, keep $4,000 | 0% | 1 | 4 | $18,743 | $47,301 |
-| 1/interval, **$200 per $400** (50%) | **0%** | 1 | 7 | $21,900 | **$68,351** |
-| 1/interval, $200 per $600 (33%) | **0%** | 1 | 6 | $12,900 | $66,332 |
-| 1/interval, $1,000 per $2,000 (50%) | **0%** | 1 | 4 | $15,000 | $65,932 |
-| 1/interval, $200 per $1,000 (20%) | **0%** | 1 | 6 | $5,700 | $58,940 |
-| 1/interval, $200 per $2,000 (10%) | **0%** | 1 | 4 | $1,100 | $53,770 |
-| 1/interval, $1,000 per $5,000 (20%) | **0%** | 1 | 4 | $2,700 | $45,476 |
-| 1/interval, never withdraw | 0% | 1 | 0 | $0 | $36,969 |
-| subscription (mode 1) | 0% | 1 | 5 | $0 | $66,548 |
+| policy | collapse rate | biggest book lost | ruin | blowups | cash in hand | net median |
+|---|---|---|---|---|---|---|
+| all-in, strip to net | **83%** | **20** | 39% | 27 | $108,955 | $152,032 |
+| 1/interval, strip to net | **28%** | **9** | 11% | 10 | $35,006 | $43,581 |
+| 1/interval, keep $4,000 | 11% | 9 | 17% | 7 | $12,820 | $29,588 |
+| 1/interval, **$200 per $400** (50%) | **0%** | 1 | 17% | 6 | $19,900 | **$62,638** |
+| 1/interval, $200 per $600 (33%) | **0%** | 1 | 22% | 6 | $12,900 | $62,623 |
+| 1/interval, $200 per $1,000 (20%) | **0%** | 1 | 28% | 5 | $5,800 | $59,066 |
+| 1/interval, $2,000 per $4,000 (50%) | **0%** | 1 | 17% | 5 | $7,300 | $54,491 |
+| 1/interval, $1,000 per $2,000 (50%) | **0%** | 1 | 17% | 5 | $12,900 | $52,213 |
+| 1/interval, $200 per $2,000 (10%) | **0%** | 1 | 28% | 5 | $1,200 | $51,344 |
+| 1/interval, $1,000 per $5,000 (20%) | **0%** | 1 | 17% | 5 | $2,800 | $40,492 |
+| 1/interval, never withdraw | 0% | 1 | 17% | 2 | $0 | $35,797 |
+| subscription (mode 1) | 0% | 1 | n/a | 6 | $0 | **$74,337** |
+
+Note what the restated numbers do to the ranking: **the subscription now has the best net
+median of anything that doesn't collapse** ($74,337), where on 22 windows the ratchet edged
+it. And every bootstrap policy now carries a 17–39% ruin rate at the $1,200 default seed,
+where before they were at 0%.
 
 **The ratchet is the fix.** Withdrawing a *share of gains* rather than stripping to a
 level never lost a book of more than **one** seat, at any rate tested, because no seat is
 ever reset to a common equity and the book keeps its dispersion. The level policies lost
-books of **19 and 20**. Withdrawing $200 per $400 gained also beats strip-to-net on **net**
-($68,351 vs $46,189) despite banking less cash, because far more equity survives.
+books of **9 and 20**. Withdrawing $200 per $400 gained also beats strip-to-net on **net**
+($62,638 vs $43,581) despite banking less cash, because far more equity survives.
 
 **Chunk size matters on its own, not just the rate.** At an identical 20%, taking $200
-per $1,000 nets $58,693 while taking $1,000 per $5,000 nets $46,331 — bigger, rarer
-withdrawals leave the seat further above the Safety Net for longer, which cuts blowups
-(3 vs 5 per window) but also starves seat purchases. That is why the policies are
-specified in money terms rather than as a percentage: two policies with the same rate are
-not the same policy.
+per $1,000 nets $59,066 while taking $1,000 per $5,000 nets $40,492 — bigger, rarer
+withdrawals leave the seat further above the Safety Net for longer, which cuts blowups but
+also starves seat purchases. That is why the policies are specified in money terms rather
+than as a percentage: two policies with the same rate are not the same policy.
 
 **Withdrawing 100% of the trigger amount always wipes out.** Every rule on the diagonal
 where the withdrawal equals the gain that triggers it ($400 per $400, $1,000 per $1,000,
@@ -240,47 +274,52 @@ One path each, not an expectation.
 
 ### The all-in book looks best on one path and is the worst bet on the distribution
 
-Over the single full 6.5-year run, all-in strip-to-net withdraws $560,428 and ends with
-almost no equity — which looks like the winner, since it is all money in hand. On the same
-path it still nets **less** than the subscription, having bought 160 seats and liquidated
-140 of them to get there:
+On the restated data, running one full 6.5-year path from January 2020 is brutal for every
+bootstrap policy — the early drawdown arrives before the book has any cushion, and a
+$1,200 seed cannot absorb it:
 
 | one full 6.5y path | own money in | cash out | equity left | **net** | blowups | collapses |
 |---|---|---|---|---|---|---|
-| subscription | $5,200 | $0 | $559,162 | **$553,962** | 6 | 0 |
-| all-in, strip to net | $1,200 | $560,428 | $9,355 | **$537,783** | 140 | 7 |
-| 1/interval, strip to net | $1,200 | $270,204 | −$64 | $258,739 | 56 | 7 |
-| $200 per $400 | $1,200 | $242,600 | $260,931 | **$496,531** | 15 | 0 |
+| subscription | $9,400 | $0 | $474,436 | **$465,036** | 27 | 0 |
+| all-in, strip to net | $1,200 | $2,303 | $0 | **−$1,097** | 17 | 1 |
+| 1/interval, strip to net | $1,200 | $282,955 | −$187 | **$270,968** | 58 | 6 |
+| $200 per $400 | $1,200 | $600 | $0 | **−$1,200** | 9 | 1 |
 
-And that single path is the survivor — the run where it happened to work. Across all 18
-windows:
+Two of the three bootstrap books **died outright**, including the one the sweep ranks best
+on median. The third survived and returned $270,968. That spread — total loss to a quarter
+million, same rule family, same data — is the clearest statement in this project of how
+much a single path is worth as evidence: nothing.
 
-| | ended below what you put in | worst window | collapse rate | net p10 | net median |
-|---|---|---|---|---|---|
-| subscription | **0%** | +$2,181 | 0% | $33,577 | $66,548 |
-| all-in, strip to net | **17%** | **−$1,200** | **50%** | **−$1,061** | $147,894 |
-| 1/interval, strip to net | 0% | +$3,667 | 28% | $8,336 | $46,189 |
-| $200 per $400 | 6% | −$250 | **0%** | $4,859 | **$68,351** |
+Across all 18 windows:
 
-All-in does have the highest median net, by a wide margin — that part is real. But it ends
-**below the money you put in 17% of the time**, its p10 is losing the seed outright, and it
-loses a book of 20 seats in half of all windows. It is simultaneously the highest-median
-and the only losing bet in the table.
+| | ended below what you put in | worst window | collapse rate | ruin | net p10 | net median |
+|---|---|---|---|---|---|---|
+| subscription | 6% | −$4,115 | **0%** | n/a | **$6,800** | **$74,337** |
+| all-in, strip to net | **39%** | −$1,200 | **83%** | 39% | −$1,200 | $152,032 |
+| 1/interval, strip to net | 17% | −$1,503 | 28% | 11% | −$1,158 | $43,581 |
+| $200 per $400 | 17% | −$1,200 | **0%** | 17% | −$1,200 | $62,638 |
+
+All-in still has the highest median net by a wide margin — and it now ends **below the
+money you put in 39% of the time**, loses a 20-seat book in **83%** of windows, and is
+outright ruined in 39%. It is the highest-median and the worst bet in the table by a
+larger margin than before.
+
+The comparison that matters most has also flipped:
 
 | | Mode 1 subscription | Mode 2, $200 per $400 |
 |---|---|---|
-| own capital in | $5,200, paid $200 at a time | $1,200 seed, paid once |
-| seats bought | 26 | 35 |
-| blowups / collapses | 6 / 0 | 15 / 0 |
-| alive at end | 20 | 20 |
-| cash withdrawn | $0 | $242,600 |
-| equity left | $559,162 | $260,931 |
-| **net** | **$553,962** | **$496,531** |
+| own capital | $4,800 per 2y, paid $200 at a time | $1,200 seed, paid once |
+| net median | **$74,337** | $62,638 |
+| net p10 | **$6,800** | **−$1,200** |
+| ended below what you put in | **6%** | 17% |
+| ruin | **impossible** (external funding) | **17%** |
+| collapse rate | 0% | 0% |
 
-The bootstrap reaches 90% of the subscription's net on under a quarter of the capital, and
-roughly half of it is already in hand rather than sitting inside prop accounts. Everything
-in the subscription column is unrealized: a seat that has never withdrawn has never
-returned a cent.
+On 22 windows the ratchet narrowly beat the subscription. On the correct 23 it does not —
+the subscription wins on median, on p10, on below-water rate, and it cannot be ruined at
+all. The bootstrap's advantage was always that it needs a quarter of the capital and banks
+half its return as cash; that remains true, and it now costs a 17% chance of losing the
+stake entirely.
 
 Note that `ruin_rate` hides wipeouts: ruin means ending with no seats *and* too little
 cash to replace one. A book that goes to zero seats and immediately rebuys is not
@@ -309,20 +348,37 @@ times over the full run.
   enough to kill the book. Staggering spreads entry points, not outcomes.
 - **The windows overlap heavily.** 18 two-year windows over a 6.5-year sample is more
   like 3–4 independent periods. Treat p10/p90 as shape, not precise quantiles.
-- **The reconstruction runs ~12% light** vs a real MT5 run of the same config
-  (8,645 trades / $40,195 vs 9,775 / $46,344), because one window's export is
-  tester-blown and the merge approximates blocking rather than reproducing it.
+- **The reconstruction runs ~5% light on trades** vs a real MT5 run of the same 23-window
+  config (9,299 vs 9,775) because the sweeps were generated in isolation, so this merge
+  approximates the blocking rather than reproducing it. Its **drawdown comes out worse**
+  than MT5's ($6,567 vs $6,069) because $1.05/round-turn is charged here and was not in
+  that tester run — so these figures are the conservative side of the comparison, which is
+  the right side for a risk decision.
 - **The withdrawal level is a real free parameter** and has not been validated
   out-of-sample. It should be, before it is trusted.
+- **One filter bug cost this project two months of wrong numbers.** Anything derived from
+  a heuristic over the sweep metadata deserves a sanity check against the raw files.
 
-### The open question worth doing next
+### RR: not worth optimising, but do avoid the edges
 
-RR was never chosen — 1.0 is the EA default, and the strategy is reportedly profitable
-anywhere from 0.5 to 10. That makes RR a *farming* parameter now, not a profit one: the
-best RR is the one that **reaches the Safety Net fastest without dying on the way**,
-because time-to-freeze governs how fast the book compounds. Lower RR turns the single
-slot over faster. `account_farming.py` already has the machinery — it is one loop over
-RR reporting freeze rate and days-to-freeze.
+Swept over the 23 windows, all in-sample:
+
+| RR | reaches Safety Net | median days | collapse | net median |
+|---|---|---|---|---|
+| 0.50 | 49% | 127 | **28%** | $439 |
+| 0.75 | 67% | 201 | 0% | $36,275 |
+| **1.00** | **76%** | 155 | **0%** | **$62,638** |
+| 1.25 | 73% | 173 | 6% | $42,296 |
+| 1.50 | 62% | 126 | 6% | $24,531 |
+| 2.00 | 78% | 134 | 0% | $43,399 |
+| 2.50 | 79% | 117 | 0% | **$68,545** |
+| 3.00 | 61% | 107 | **11%** | $44,875 |
+
+Net median bounces $24k → $68k between neighbouring values with no monotonic structure:
+that is noise, not a surface with an optimum. What *is* robust is that **RR 0.50 is bad**
+(49% freeze, 28% collapse) and days-to-freeze falls as RR rises. RR 1.00 sits mid-plateau
+with a 0% collapse rate; RR 2.50 scores higher on net but that gap is inside the noise.
+Pick a value whose neighbours also work and stop there.
 
 ## Options
 

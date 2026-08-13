@@ -246,8 +246,11 @@ def pass_is_blown(stats_root: Path, window: str, rr: float):
         return None
     try:
         row = stats.iloc[0]
-        return (float(row["equity_dd"]) >= DEPOSIT * 0.95
-                or float(row["net_profit"]) <= -DEPOSIT * 0.95)
+        # Only a wiped-out account truncates the export. An earlier version also
+        # tripped on equity_dd >= 95% of the deposit, which is NOT liquidation -
+        # a $5,000 pass can draw down $4,774 and still finish every trade. That
+        # false positive silently dropped a valid window from every study.
+        return float(row["net_profit"]) <= -DEPOSIT * 0.95
     except (KeyError, IndexError, ValueError):
         return None
 
@@ -740,9 +743,11 @@ they were defined.</div>
 <h2>9 &middot; Reconstruction check</h2>
 <div class="panel" style="overflow:auto" id="t_rec"></div>
 <div class="note">The merged single-position stream against a real MT5 run of the same
-configuration. It runs light: one window's export is tester-blown and excluded, and the
-sweeps were each generated in isolation so the merge approximates the blocking rather
-than reproducing it.</div>
+configuration. It still runs a few percent light, because the sweeps were each generated
+in isolation so this merge approximates the blocking rather than reproducing it. The
+drawdown comes out slightly <i>worse</i> than MT5's because $__COMMV__ per round turn is
+charged here and was not in that tester run &mdash; so these figures are the conservative
+side of the comparison.</div>
 <div class="note" id="foot"></div>
 </main><script>
 const D=__DATA__,CFG={displaylogo:false,responsive:true};
@@ -1963,8 +1968,9 @@ def main():
             {"metric": "equity drawdown", "sim": f"${dd_equity(net, mae, mfe):,.0f}",
              "mt5": f"${MT5_REF['eq_dd']:,.0f}"},
             {"metric": "windows merged", "sim": f"{len(st['windows'])}",
-             "mt5": f"{len(st['windows']) + len(st['blown'])} "
-                    f"(one export tester-blown, dropped)"},
+             "mt5": (f"{len(st['windows']) + len(st['blown'])} "
+                     f"({len(st['blown'])} dropped: {', '.join(st['blown'])})"
+                     if st["blown"] else f"{len(st['windows'])} (none dropped)")},
         ],
     })
 
