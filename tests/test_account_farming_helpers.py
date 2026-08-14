@@ -137,11 +137,13 @@ class InputValidationTests(unittest.TestCase):
             frame = read_trade_file(path)
 
         self.assertEqual(list(frame.columns),
-                         ["Ticket", "Entry_time", "Exit_time", "MAE", "MFE", "PNL"])
+                         ["Ticket", "Entry_time", "Exit_time", "MAE", "MFE", "PNL",
+                          "Candle_range"])
         self.assertEqual(len(frame), 1)
         self.assertEqual(frame.iloc[0]["MAE"], -25.5)
         self.assertEqual(frame.iloc[0]["MFE"], 80.0)
         self.assertEqual(frame.iloc[0]["PNL"], 50.0)
+        self.assertEqual(frame.iloc[0]["Candle_range"], 100.0)
 
     def test_strict_stream_rejects_tester_truncated_pass(self):
         with tempfile.TemporaryDirectory() as tmp:

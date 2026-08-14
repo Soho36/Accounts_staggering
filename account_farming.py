@@ -194,7 +194,7 @@ def read_trade_file(path: Path) -> pd.DataFrame:
         raise last_error or ValueError(f"Could not read {path}")
     if raw.empty:
         return pd.DataFrame(columns=["Ticket", "Entry_time", "Exit_time",
-                                     "MAE", "MFE", "PNL"])
+                                     "MAE", "MFE", "PNL", "Candle_range"])
 
     header = str(raw.iloc[0, 0]).strip().lower() in {"ticket", "#", "id"}
     if header:
@@ -207,15 +207,18 @@ def read_trade_file(path: Path) -> pd.DataFrame:
             "mae": "MAE", "mae_money": "MAE",
             "mfe": "MFE", "mfe_money": "MFE",
             "pnl": "PNL", "trade_profit": "PNL",
+            "candle_range": "Candle_range", "extra": "Candle_range",
         }
         raw = raw.rename(columns={c: aliases.get(c.lower(), c) for c in raw.columns})
     else:
         if raw.shape[1] < 6:
             raise ValueError(f"{path} has {raw.shape[1]} columns; expected at least 6.")
-        # The headerless sweep export has a seventh, undocumented field.  It is
-        # not a commission (far too large, and it tracks trade risk), so keep it
-        # as Extra and charge COMMISSION_ROUNDTURN instead.
-        names = ["Ticket", "Entry_time", "Exit_time", "MAE", "MFE", "PNL", "Extra"]
+        # The supplied EA writes its entry candle range as the seventh field.
+        # Preserve it: for one MNQ contract it is also the stop distance in
+        # points, so routing studies can compare nominal initial risk.  It is not
+        # a commission; charge COMMISSION_ROUNDTURN separately.
+        names = ["Ticket", "Entry_time", "Exit_time", "MAE", "MFE", "PNL",
+                 "Candle_range"]
         raw = raw.iloc[:, :len(names)]
         raw.columns = names[:raw.shape[1]]
 
@@ -226,14 +229,19 @@ def read_trade_file(path: Path) -> pd.DataFrame:
     if "Ticket" not in raw:
         raw["Ticket"] = np.arange(1, len(raw) + 1, dtype=int)
 
-    for column in ("MAE", "MFE", "PNL"):
+    for column in ("MAE", "MFE", "PNL", "Candle_range"):
+        if column not in raw:
+            continue
         raw[column] = pd.to_numeric(
             raw[column].astype(str).str.replace(",", ".", regex=False).str.strip(),
             errors="coerce").fillna(0.0)
     for column in ("Entry_time", "Exit_time"):
         raw[column] = pd.to_datetime(raw[column], errors="coerce")
     raw = raw.dropna(subset=["Entry_time", "Exit_time"]).copy()
-    return raw[["Ticket", "Entry_time", "Exit_time", "MAE", "MFE", "PNL"]]
+    columns = ["Ticket", "Entry_time", "Exit_time", "MAE", "MFE", "PNL"]
+    if "Candle_range" in raw:
+        columns.append("Candle_range")
+    return raw[columns]
 
 
 def pass_is_blown(stats_root: Path, window: str, rr: float):

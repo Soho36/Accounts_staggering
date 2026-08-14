@@ -74,8 +74,9 @@ near-identical results on this data (the freeze rates differed by 0.2pp on the 2
 set; the ordering, not the magnitude, is the point).
 
 Commission is hardcoded at **$1.05 round turn** (`COMMISSION_ROUNDTURN`) — it is the
-broker's real figure, not a tuning knob. The seventh column in the sweep exports is *not*
-a commission, so it is preserved as `Extra` and ignored.
+broker's real figure, not a tuning knob. The supplied EA identifies the seventh sweep
+column as `candle_range`: for one MNQ contract it is the initial stop distance in points.
+It is preserved for exposure diagnostics and is *not* treated as commission.
 
 ## ⚠ Historical figures versus the current decision artifacts
 
@@ -84,7 +85,8 @@ changed. They contain dated/default-seed examples and should not be treated as t
 operating table. For current, reproducible decision numbers use:
 
 - `results/allocation_sweep.md` for Mode 2 seed/cadence/DD/cap/withdrawal decisions;
-- `results/schedule_oos.md` for the time-window schedule hypothesis; and
+- `results/schedule_oos.md` for the time-window schedule hypothesis;
+- `results/signal_routing.md` for causal all-window routing at matched exposure; and
 - `results/farming_withdrawal_policies.csv` for the exact settings shown in the latest HTML.
 
 Those artifacts distinguish realized cash, safely cashable endpoint value, optimistic prop
@@ -103,14 +105,25 @@ mark, 5+ seat shocks, and full-book extinction. Rerun them after any simulator c
   exposure. With 23 dedicated hourly seats the 2023+ book took only 5.9% as many
   contract-trades as 23 identical all-window seats. Most of the apparent drawdown reduction
   is therefore de-levering/time-of-day weighting, not evidence that filtering found alpha.
+- Dynamic routing removes that conflict without disabling an hour. The 23 RR 1.00 exports
+  reached at most five simultaneous positions in both 2020-2022 and 2023+, so the observed
+  exact-fill boundary is `K = 5R`: five seats for one portfolio copy and ten for two. That
+  is a historical capacity result, not a guarantee that future overlap cannot exceed five.
+- Eight to ten routed seats therefore support only one or two copies of every exported signal.
+  Preserving exposure similar to eight to ten fully copied legacy all-window accounts requires
+  about `R=6-8`, or roughly 30-40 routed seats. At exact exposure, routing free signals to
+  the account with the most DD headroom beat round-robin in 17/18 pre-2023 paired episode
+  comparisons and 18/18 exact-capacity 2023+ comparisons. The precise best K above `5R`
+  was unstable; use `K=5R` as the research/pilot boundary, not 30-40 as a universal optimum.
 - For starts, buy **one seat per event on a fixed calendar**. At the deliberately optimistic
   100% split, a $3,000 seed and 45-day starts produced cashout median/p10 of $25,018/$287,
   with 0/18 observed ruin and 0/18 five-seat shocks. At 90% and 80% payout splits its p10
   became -$81 and -$450. Those are overlapping in-sample windows, so none of these is a
   claim of safety or a live optimum.
-- A provisional cap of **8-10 live seats** captured nearly all of the 45-day median in this
-  model. Raising the cap to 20 added no typical cashout there. At 30 days it added little
-  median and increased observed liquidation clustering.
+- For the earlier calendar-started, identically copied Mode 2 book, a provisional cap of
+  **8-10 live seats** captured nearly all of the 45-day median. This is a different exposure
+  design from the dynamic router above. Raising that copied-book cap to 20 added no typical
+  cashout there; at 30 days it added little median and increased observed clustering.
 - The risk-first withdrawal diagnostic is the **$200 per $400 gain ratchet**. At $3,000/30d,
   $200 per $1,000 raised median cashout from $38,769 to $43,669 but lowered p10 from $220
   to -$2,733 and left much less realized cash. The ratchet remains fitted in-sample.
@@ -481,6 +494,11 @@ Written into `results/`:
   withdrawal, DD, cap, trigger, and payout-split diagnostics
 - `schedule_oos.csv` / `schedule_oos.md` / `schedule_oos_rolling_years.csv` — raw
   train/test and rolling-year diagnostics for the disjoint-window schedule hypothesis
+- `signal_routing_capacity.csv` / `signal_routing_economics.csv` /
+  `signal_routing_summary.csv` / `signal_routing.md` / `signal_routing.xlsx` — causal
+  dynamic routing with all
+  windows enabled, separate signal-multiplicity and seat-count controls, exact-exposure
+  comparisons, prop DD/payout economics, pre-2023 selection, and a 2023+ holdout
 
 The HTML report has nine sections: whether a seat reaches the Safety Net by start date;
 closed vs floating drawdown; mode 1 with its portfolio curve and per-seat curves; mode 2
