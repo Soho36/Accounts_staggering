@@ -76,7 +76,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         // ===== SIGNAL ROUTING =====
         [NinjaScriptProperty]
         [Display(Name = "Routing Mode", Order = 0, GroupName = "Signal Routing",
-                 Description = "Off = behave exactly as before. Shadow = observe and log only, never blocks. Live = the router decides which seats submit.")]
+                 Description = "NONE of these is a dry run — all three submit real orders. " +
+                               "Routed = only signals the router sends here (an unseeded seat trades nothing). " +
+                               "UnroutedLogOnly = trades EVERY enabled window, router only logs. " +
+                               "Unrouted = trades EVERY enabled window, no router. " +
+                               "To trade without real orders, use a Sim101 account.")]
         public PropRouterMode RoutingMode { get; set; }
 
         [NinjaScriptProperty]
@@ -388,9 +392,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ExitOffset = 0;
                 UseTradeWindow = true;
 
-                // Routing defaults deliberately start in Shadow: the first deployment
-                // must not change live behaviour.
-                RoutingMode = PropRouterMode.Shadow;
+                // Default is the fail-closed option: with no seeded peak in peaks_<book>.csv,
+                // Routed selects nothing and the strategy trades nothing. The unrouted modes
+                // submit on every enabled window and are the dangerous default, not the safe one.
+                RoutingMode = PropRouterMode.Routed;
                 BookId = "LIVE";
                 GlobalCopies = 1;
                 SeatStartBalance = 50000;
@@ -453,11 +458,36 @@ namespace NinjaTrader.NinjaScript.Strategies
         // Router plumbing
         // =====================================================================
 
+        /// <summary>
+        /// Both unrouted modes let EVERY enabled window trade on this account. Neither is a dry run.
+        /// That is safe with the legacy per-chart window split, but if all six charts share the same
+        /// all-window config it means six copies of every signal - R=6 on a book sized for R=1.
+        /// </summary>
+        private void WarnIfUnrouted()
+        {
+            if (RoutingMode == PropRouterMode.Routed)
+                return;
+
+            int enabled = 0;
+            if (windowRiskRewards != null)
+                foreach (double rr in windowRiskRewards)
+                    if (rr > 0) enabled++;
+
+            Print($"[{EntrySignalName}] ⚠️ Routing Mode = {RoutingMode}: this is NOT a dry run. Real orders " +
+                  $"will be submitted on account {(Account == null ? "?" : Account.Name)} for all " +
+                  $"{enabled} of its enabled windows, unrouted.");
+            Print($"[{EntrySignalName}] ⚠️ If every chart in book '{BookId}' has the same windows enabled, " +
+                  $"the book is running {enabled}-window copies on all seats, not R={GlobalCopies}. " +
+                  $"Keep the legacy per-chart window split until you switch to Live.");
+        }
+
         private void RegisterSeat()
         {
-            if (RoutingMode == PropRouterMode.Off)
+            WarnIfUnrouted();
+
+            if (RoutingMode == PropRouterMode.Unrouted)
             {
-                Print($"[{EntrySignalName}] Routing Mode = Off — running as an unrouted single account");
+                Print($"[{EntrySignalName}] Routing Mode = Unrouted — no seat registered, no router involvement");
                 return;
             }
 
@@ -488,7 +518,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             Print($"[{EntrySignalName}] 🔗 seat registered — book={BookId} account={Account.Name} " +
                   $"start={SeatStartBalance:F0} dd={SeatDrawdown:F0} freeze=+{SeatFrozenOffset:F0} " +
-                  $"mode={RoutingMode} R={GlobalCopies} ({reason})");
+                  $"mode={RoutingMode} R={GlobalCopies}");
+
+            if (PropRouter.IsSeeded(BookId, InstanceId))
+            {
+                Print($"[{EntrySignalName}]    {reason}");
+            }
+            else
+            {
+                Print($"[{EntrySignalName}] ⛔ PEAK NOT SEEDED — {reason}");
+                Print($"[{EntrySignalName}] ⛔ This seat will publish state but will NEVER be selected. " +
+                      $"Add its row to peaks_{BookId}.csv (account name must match '{Account.Name}' exactly), " +
+                      $"then restart the strategy.");
+            }
         }
 
         private void ReleaseSeat()
@@ -569,7 +611,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         /// </summary>
         private bool MayEnter()
         {
-            if (RoutingMode == PropRouterMode.Off)
+            if (RoutingMode == PropRouterMode.Unrouted)
                 return true;
 
             // Already carrying this signal: re-pricing a working entry is a continuation,
@@ -584,14 +626,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ? riskPerTrade * Instrument.MasterInstrument.PointValue * EntryQuantity
                 : 0.0;
 
-            if (RoutingMode == PropRouterMode.Shadow)
+            if (RoutingMode == PropRouterMode.UnroutedLogOnly)
             {
-                Print($"[{Time[0]}] [{EntrySignalName}] 👁 shadow — " +
+                Print($"[{Time[0]}] [{EntrySignalName}] 👁 log-only, ENTRY STILL SUBMITTED — " +
                       PropRouter.Preview(BookId, InstanceId, GlobalCopies, requiredHeadroom));
                 return true;
             }
 
-            // Live. Fail closed: an unregistered seat never trades.
+            // Routed. Fail closed: an unregistered seat never trades.
             if (!routerRegistered)
             {
                 Print($"[{Time[0]}] [{EntrySignalName}] ⛔ router not registered → standing down");

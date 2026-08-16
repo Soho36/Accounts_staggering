@@ -35,11 +35,21 @@ namespace NinjaTrader.NinjaScript.AddOns
 		InPosition		// filled - busy with an earlier signal, invisible to router
 	}
 
+	/// <summary>
+	/// NONE of these modes is a dry run. Every mode submits real orders to the account the
+	/// strategy is running on. The mode controls only whether the router may VETO an entry.
+	/// To trade without real orders, run the chart on a Sim101 account.
+	/// </summary>
 	public enum PropRouterMode
 	{
-		Off,			// router bypassed entirely, strategy behaves as before
-		Shadow,			// router observes and logs, but never blocks an entry
-		Live			// router decides which seats may submit
+		/// <summary>Router decides which seats submit. An unseeded seat is never selected, so this fails closed.</summary>
+		Routed,
+
+		/// <summary>ORDERS STILL SUBMITTED on every enabled window. The router only writes what it would have chosen.</summary>
+		UnroutedLogOnly,
+
+		/// <summary>ORDERS STILL SUBMITTED on every enabled window. Router bypassed entirely.</summary>
+		Unrouted
 	}
 
 	public class PropSeat
@@ -51,6 +61,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public double		FrozenOffset;
 		public double		Equity			= double.NaN;
 		public double		Peak			= double.NaN;
+
+		/// <summary>
+		/// True only when the peak came from the stored seed file or an explicit OverridePeak.
+		/// A peak bootstrapped from whatever equity happened to be present at startup is NOT
+		/// seeded: it would put the floor at equity - dd and make a damaged seat look pristine.
+		/// Unseeded seats are never selected.
+		/// </summary>
+		public bool			PeakSeeded;
+
 		public SeatStatus	Status			= SeatStatus.Free;
 		public bool			Connected;
 		public int			TradesTaken;
@@ -145,9 +164,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 				LoadPeak(book, seat);
 
-				reason = seat.HasEquity
-					? string.Format(CultureInfo.InvariantCulture, "peak restored at {0:F2}", seat.Peak)
-					: "no stored peak - seat stays ineligible until equity is published";
+				reason = seat.PeakSeeded
+					? string.Format(CultureInfo.InvariantCulture,
+						"peak seeded at {0:F2}, floor {1:F2}", seat.Peak, seat.Floor)
+					: string.Format(CultureInfo.InvariantCulture,
+						"NOT SEEDED - no row for '{0}' in {1}; this seat will never be selected until one exists",
+						seat.AccountName, Path.GetFileName(PeakPath(book)));
 				return true;
 			}
 		}
@@ -182,11 +204,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 				seat.Connected	= connected;
 				seat.EquityAsOf	= DateTime.UtcNow;
 
+				// The peak still ratchets on an unseeded seat so the value is sane once it is
+				// seeded, but PeakSeeded stays false and Allocate keeps the seat out of selection.
 				bool newHigh = double.IsNaN(seat.Peak) || equity > seat.Peak;
 				if (newHigh)
 					seat.Peak = equity;
 
-				if (newHigh || (DateTime.UtcNow - b.LastPersist).TotalSeconds >= PersistThrottleSeconds)
+				if (seat.PeakSeeded
+					&& (newHigh || (DateTime.UtcNow - b.LastPersist).TotalSeconds >= PersistThrottleSeconds))
 					PersistPeaks(book, b, false);
 			}
 		}
@@ -220,8 +245,19 @@ namespace NinjaTrader.NinjaScript.AddOns
 				if (!b.Seats.TryGetValue(instanceId, out seat))
 					return;
 
-				seat.Peak = peak;
+				seat.Peak		= peak;
+				seat.PeakSeeded	= true;
 				PersistPeaks(book, b, true);
+			}
+		}
+
+		/// <summary>True when this seat's peak came from the seed file or an explicit override.</summary>
+		public static bool IsSeeded(string book, int instanceId)
+		{
+			lock (sync)
+			{
+				PropSeat seat;
+				return GetBook(book).Seats.TryGetValue(instanceId, out seat) && seat.PeakSeeded;
 			}
 		}
 
@@ -272,7 +308,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		/// <summary>Non-mutating view of what the router would decide. Used by Shadow mode.</summary>
+		/// <summary>Non-mutating view of what the router would decide. Used by UnroutedLogOnly.</summary>
 		public static string Preview(string book, int instanceId, int copies, double requiredHeadroom)
 		{
 			lock (sync)
@@ -294,12 +330,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 				PropBook b = GetBook(book);
 				StringBuilder sb = new StringBuilder();
 				foreach (PropSeat s in b.Seats.Values.OrderBy(x => x.InstanceId))
-					sb.AppendFormat(CultureInfo.InvariantCulture, "{0}#{1}[{2} hr={3} {4}{5}] ",
+					sb.AppendFormat(CultureInfo.InvariantCulture, "{0}#{1}[{2} hr={3} {4}{5}{6}] ",
 						sb.Length == 0 ? "" : "| ",
 						s.InstanceId, s.AccountName,
 						s.HasEquity ? s.Headroom.ToString("F0", CultureInfo.InvariantCulture) : "n/a",
 						s.Status,
-						s.Frozen ? " FROZEN" : "");
+						s.Frozen ? " FROZEN" : "",
+						s.PeakSeeded ? "" : " UNSEEDED");
 				return sb.ToString();
 			}
 		}
@@ -317,6 +354,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				.Where(s => s.Status == SeatStatus.Free
 						 && s.Connected
 						 && s.HasEquity
+						 && s.PeakSeeded			// an unverified peak is worse than no router
 						 && s.Headroom > 0
 						 && s.Headroom >= requiredHeadroom)
 				.OrderByDescending(s => s.Headroom)
@@ -326,9 +364,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 			List<int> winners = eligible.Take(need).Select(s => s.InstanceId).ToList();
 
+			int unseeded = b.Seats.Values.Count(s => !s.PeakSeeded);
+
 			detail = string.Format(CultureInfo.InvariantCulture,
-				"R={0} pending={1} need={2} eligible={3}/{4} blocked={5}",
-				copies, pending, need, eligible.Count, b.Seats.Count, Math.Max(0, need - winners.Count));
+				"R={0} pending={1} need={2} eligible={3}/{4} blocked={5}{6}",
+				copies, pending, need, eligible.Count, b.Seats.Count,
+				Math.Max(0, need - winners.Count),
+				unseeded > 0 ? " UNSEEDED=" + unseeded : string.Empty);
 
 			return winners;
 		}
@@ -361,6 +403,19 @@ namespace NinjaTrader.NinjaScript.AddOns
 			get { return Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "PropRouter"); }
 		}
 
+		/// <summary>
+		/// NT8 shows accounts as "NAME!Provider!Connection" in some UI contexts but Account.Name
+		/// is usually the bare name. Comparing on the part before the first '!' matches either
+		/// form, so a hand-written seed row works whichever string was copied.
+		/// </summary>
+		private static string NormalizeAccount(string name)
+		{
+			if (string.IsNullOrEmpty(name))
+				return string.Empty;
+			int cut = name.IndexOf('!');
+			return (cut >= 0 ? name.Substring(0, cut) : name).Trim();
+		}
+
 		private static string Sanitize(string name)
 		{
 			StringBuilder sb = new StringBuilder();
@@ -388,7 +443,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 					string[] f = line.Split(',');
 					if (f.Length < 4)
 						continue;
-					if (!string.Equals(f[0], seat.AccountName, StringComparison.OrdinalIgnoreCase))
+					if (!string.Equals(NormalizeAccount(f[0]), NormalizeAccount(seat.AccountName),
+							StringComparison.OrdinalIgnoreCase))
 						continue;
 
 					double start, dd, peak;
@@ -396,7 +452,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 						&& double.TryParse(f[2], NumberStyles.Any, CultureInfo.InvariantCulture, out dd)
 						&& double.TryParse(f[3], NumberStyles.Any, CultureInfo.InvariantCulture, out peak))
 					{
-						seat.Peak = peak;
+						seat.Peak		= peak;
+						seat.PeakSeeded	= true;
 						// Configured start/dd win over the stored copy; the file only carries the peak.
 					}
 					return;
@@ -416,7 +473,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 				Directory.CreateDirectory(StateDir);
 				StringBuilder sb = new StringBuilder();
 				sb.AppendLine("account,start_balance,drawdown,peak,updated_utc");
-				foreach (PropSeat s in b.Seats.Values.Where(x => x.HasEquity).OrderBy(x => x.AccountName))
+				// Only seeded seats are written back. Persisting a bootstrapped peak would
+				// launder it into a "seeded" value on the next restart.
+				foreach (PropSeat s in b.Seats.Values.Where(x => x.HasEquity && x.PeakSeeded).OrderBy(x => x.AccountName))
 					sb.AppendFormat(CultureInfo.InvariantCulture, "{0},{1:F2},{2:F2},{3:F2},{4:yyyy-MM-ddTHH:mm:ssZ}\n",
 						s.AccountName, s.StartBalance, s.DrawdownSize, s.Peak, DateTime.UtcNow);
 
@@ -439,7 +498,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				StringBuilder sb = new StringBuilder();
 
 				if (fresh)
-					sb.AppendLine("utc,bar_time,copies,winners,detail,seat,account,status,equity,peak,floor,headroom,frozen,trades");
+					sb.AppendLine("utc,bar_time,copies,winners,detail,seat,account,status,equity,peak,floor,headroom,frozen,seeded,trades");
 
 				string stamp   = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
 				string bar     = barTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
@@ -447,12 +506,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 				foreach (PropSeat s in b.Seats.Values.OrderBy(x => x.InstanceId))
 					sb.AppendFormat(CultureInfo.InvariantCulture,
-						"{0},{1},{2},{3},{4},{5},{6},{7},{8:F2},{9:F2},{10:F2},{11:F2},{12},{13}\n",
+						"{0},{1},{2},{3},{4},{5},{6},{7},{8:F2},{9:F2},{10:F2},{11:F2},{12},{13},{14}\n",
 						stamp, bar, copies, winStr, detail,
 						s.InstanceId, s.AccountName, s.Status,
 						s.HasEquity ? s.Equity : 0, s.HasEquity ? s.Peak : 0,
 						s.HasEquity ? s.Floor : 0, s.HasEquity ? s.Headroom : 0,
-						s.Frozen, s.TradesTaken);
+						s.Frozen, s.PeakSeeded, s.TradesTaken);
 
 				File.AppendAllText(path, sb.ToString());
 			}
