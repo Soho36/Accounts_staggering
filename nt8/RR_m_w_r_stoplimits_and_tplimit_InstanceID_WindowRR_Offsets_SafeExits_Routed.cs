@@ -9,18 +9,17 @@ using NinjaTrader.NinjaScript.AddOns;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 #endregion
 
 // -----------------------------------------------------------------------------
 // Routed variant of RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExits.
 //
-// The trading logic below is UNCHANGED. The only addition is a routing gate on
-// the entry: when Routing Mode is Live, an instance may only submit an entry if
-// PropRouter selects it as one of the R seats carrying that signal.
-//
-// Everything downstream of the entry - stop-limit placement, the R:R limit exit,
-// safe-exit bookkeeping and the 23:57 flatten - is untouched, so any difference
-// in outcome is attributable to the allocation decision and nothing else.
+// This began as the original strategy plus a routing gate. The live-facing variant
+// now also contains startup, quantity, order-error, heartbeat and cutoff interlocks.
+// Its stop-limit protection and bar-close take-profit semantics are intentionally
+// preserved, but remain explicit release blockers described in README.md.
 //
 // Requires: bin\Custom\AddOns\PropRouter.cs
 // -----------------------------------------------------------------------------
@@ -36,24 +35,35 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double pendingRiskReward;
         private double positionRiskReward;
         private bool takeProfitSubmitted;
+        private readonly object exitOrdersSync = new object();
         private readonly List<Order> stopOrders = new List<Order>();
         private readonly List<Order> takeProfitOrders = new List<Order>();
         private DateTime lastFlattenDate = Core.Globals.MinDate;
         private bool lastWindowState = false;
 
         // Router plumbing
-        private bool routerRegistered;
-        private bool accountSubscribed;
+        private volatile bool routerRegistered;
+        private Guid routerLease = Guid.Empty;
+        private volatile bool startupBlocked;
+        private DateTime lastRouterHeartbeatUtc = Core.Globals.MinDate;
+        private string lastRouterFailure = string.Empty;
+        private DateTime lastRouterFailureUtc = Core.Globals.MinDate;
+        private readonly object routerStatusSync = new object();
+        private readonly object routerEquitySync = new object();
+        private SeatStatus routerSeatStatus = SeatStatus.Free;
+        private bool strategyPositionFlat = true;
 
         // Derived signal names — all unique per instance to prevent cross-instance interference
         private string EntrySignalName    => $"Long1_{InstanceId}";
         private string StopLossSignalName => $"StopLimit_{InstanceId}";
         private string TakeProfitName     => $"RR_Limit_{InstanceId}";
         private string FlattenName        => $"DailyFlatten_{InstanceId}";
+        private string EmergencyExitName  => $"InvalidStopExit_{InstanceId}";
         private int EntryQuantity         => UseCustomQuantity ? CustomQuantity : DefaultQuantity;
 
 		// ===== INSTANCE ID =====
 		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
 		[Display(Name = "Instance ID", Order = 0, GroupName = "Risk Management",
 		         Description = "Unique ID per chart instance — prevents cross-instance order interference when running multiple copies")]
 		public int InstanceId { get; set; }
@@ -80,7 +90,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                                "Routed = only signals the router sends here (an unseeded seat trades nothing). " +
                                "UnroutedLogOnly = trades EVERY enabled window, router only logs. " +
                                "Unrouted = trades EVERY enabled window, no router. " +
-                               "To trade without real orders, use a Sim101 account.")]
+                               "To trade without real orders, use simulation accounts; independent seats need distinct accounts.")]
         public PropRouterMode RoutingMode { get; set; }
 
         [NinjaScriptProperty]
@@ -95,30 +105,36 @@ namespace NinjaTrader.NinjaScript.Strategies
         public int GlobalCopies { get; set; }
 
         [NinjaScriptProperty]
-        [Range(0.0, double.MaxValue)]
-        [Display(Name = "Seat starting balance", Order = 3, GroupName = "Signal Routing",
+        [Range(1, 100)]
+        [Display(Name = "Expected seats in book", Order = 3, GroupName = "Signal Routing",
+                 Description = "Fail-closed quorum. Routing stays disarmed until exactly this many matching, seeded, connected seats are fresh.")]
+        public int ExpectedSeats { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.01, double.MaxValue)]
+        [Display(Name = "Seat starting balance", Order = 4, GroupName = "Signal Routing",
                  Description = "This account's starting balance. The drawdown floor is measured against it.")]
         public double SeatStartBalance { get; set; }
 
         [NinjaScriptProperty]
-        [Range(0.0, double.MaxValue)]
-        [Display(Name = "Seat trailing drawdown", Order = 4, GroupName = "Signal Routing",
+        [Range(0.01, double.MaxValue)]
+        [Display(Name = "Seat trailing drawdown", Order = 5, GroupName = "Signal Routing",
                  Description = "This account's max trailing drawdown in dollars — 1500 on a 25K seat, 2500 on a 50K seat.")]
         public double SeatDrawdown { get; set; }
 
         [NinjaScriptProperty]
         [Range(0.0, double.MaxValue)]
-        [Display(Name = "Frozen floor offset", Order = 5, GroupName = "Signal Routing",
+        [Display(Name = "Frozen floor offset", Order = 6, GroupName = "Signal Routing",
                  Description = "Profit above the starting balance at which the trailing floor stops rising. Apex: 100.")]
         public double SeatFrozenOffset { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Track peak on unrealized", Order = 6, GroupName = "Signal Routing",
+        [Display(Name = "Track peak on unrealized", Order = 7, GroupName = "Signal Routing",
                  Description = "True = NetLiquidation, for an intraday trailing drawdown. False = CashValue, for an end-of-day rule.")]
         public bool UseUnrealizedEquity { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Require headroom covers stop", Order = 7, GroupName = "Signal Routing",
+        [Display(Name = "Require headroom covers stop", Order = 8, GroupName = "Signal Routing",
                  Description = "Optional safety: skip any seat whose headroom is smaller than this trade's initial stop risk. Off matches the study exactly.")]
         public bool RequireHeadroomCoversStop { get; set; }
 
@@ -385,7 +401,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ExitOnSessionCloseSeconds = 30;
                 StartBehavior = StartBehavior.ImmediatelySubmit;
                 IsUnmanaged = false;
-                RealtimeErrorHandling = RealtimeErrorHandling.IgnoreAllErrors;
+                // There is no complete custom rejection state machine here. NinjaTrader's
+                // fail-safe behavior is therefore mandatory: cancel working orders, close the
+                // strategy position and stop rather than continue after a rejected live order.
+                RealtimeErrorHandling = RealtimeErrorHandling.StopCancelClose;
                 InstanceId = 1;
                 UseCustomQuantity = false;
                 CustomQuantity = 1;
@@ -396,8 +415,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Routed selects nothing and the strategy trades nothing. The unrouted modes
                 // submit on every enabled window and are the dangerous default, not the safe one.
                 RoutingMode = PropRouterMode.Routed;
-                BookId = "LIVE";
+                BookId = "PLAYBACK_ONLY";
                 GlobalCopies = 1;
+                ExpectedSeats = 6;
                 SeatStartBalance = 50000;
                 SeatDrawdown = 2500;
                 SeatFrozenOffset = 100;
@@ -441,9 +461,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 riskPerTrade = 0;
                 pendingRiskReward = 0;
                 positionRiskReward = 0;
-                takeProfitSubmitted = false;
-                stopOrders.Clear();
-                takeProfitOrders.Clear();
+                ResetExitTracking();
+                routerRegistered = false;
+                routerLease = Guid.Empty;
+                startupBlocked = false;
+                lastRouterHeartbeatUtc = Core.Globals.MinDate;
+                lastRouterFailure = string.Empty;
+                lastRouterFailureUtc = Core.Globals.MinDate;
+                lock (routerStatusSync)
+                {
+                    routerSeatStatus = SeatStatus.Free;
+                    strategyPositionFlat = true;
+                }
                 Print($"=== Strategy entering REALTIME mode (Instance {InstanceId}, signal={EntrySignalName}) ===");
 
                 RegisterSeat();
@@ -460,7 +489,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         /// <summary>
         /// Both unrouted modes let EVERY enabled window trade on this account. Neither is a dry run.
-        /// That is safe with the legacy per-chart window split, but if all six charts share the same
+        /// That preserves the legacy per-chart exposure split, but if all six charts share the same
         /// all-window config it means six copies of every signal - R=6 on a book sized for R=1.
         /// </summary>
         private void WarnIfUnrouted()
@@ -478,12 +507,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                   $"{enabled} of its enabled windows, unrouted.");
             Print($"[{EntrySignalName}] ⚠️ If every chart in book '{BookId}' has the same windows enabled, " +
                   $"the book is running {enabled}-window copies on all seats, not R={GlobalCopies}. " +
-                  $"Keep the legacy per-chart window split until you switch to Live.");
+                  $"Keep the legacy per-chart window split until you switch to Routed.");
         }
 
         private void RegisterSeat()
         {
             WarnIfUnrouted();
+
+            string preflightReason;
+            if (!ValidateStartup(out preflightReason))
+            {
+                startupBlocked = true;
+                Print($"[{EntrySignalName}] ⛔ STARTUP INTERLOCK — {preflightReason}");
+                Print($"[{EntrySignalName}] ⛔ No new entries are permitted in ANY routing mode. " +
+                      "Resolve the account/order/configuration state, then disable and re-enable the strategy.");
+                return;
+            }
 
             if (RoutingMode == PropRouterMode.Unrouted)
             {
@@ -491,73 +530,231 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            if (Account == null)
-            {
-                Print($"[{EntrySignalName}] ⛔ no Account on this strategy — seat NOT registered");
-                return;
-            }
-
             string reason;
             routerRegistered = PropRouter.Register(BookId, InstanceId, Account.Name,
-                SeatStartBalance, SeatDrawdown, SeatFrozenOffset, out reason);
+                SeatStartBalance, SeatDrawdown, SeatFrozenOffset,
+                ExpectedSeats, GlobalCopies, BuildRouterConfigKey(),
+                out routerLease, out reason);
 
             if (!routerRegistered)
             {
-                Print($"[{EntrySignalName}] ⛔ SEAT REGISTRATION REFUSED — {reason}. This instance will not trade.");
+                routerLease = Guid.Empty;
+                Print($"[{EntrySignalName}] ⛔ SEAT REGISTRATION REFUSED — {reason}.");
+                Print(RoutingMode == PropRouterMode.Routed
+                    ? $"[{EntrySignalName}] ⛔ Routed mode fails closed: this instance will not trade."
+                    : $"[{EntrySignalName}] ⚠️ UnroutedLogOnly still submits entries, but router previews are unavailable.");
                 return;
-            }
-
-            if (!accountSubscribed)
-            {
-                Account.AccountItemUpdate += OnAccountItemUpdate;
-                accountSubscribed = true;
             }
 
             PublishEquity();
             PublishStatus();
 
             Print($"[{EntrySignalName}] 🔗 seat registered — book={BookId} account={Account.Name} " +
-                  $"start={SeatStartBalance:F0} dd={SeatDrawdown:F0} freeze=+{SeatFrozenOffset:F0} " +
-                  $"mode={RoutingMode} R={GlobalCopies}");
+                   $"start={SeatStartBalance:F0} dd={SeatDrawdown:F0} freeze=+{SeatFrozenOffset:F0} " +
+                   $"mode={RoutingMode} seats={ExpectedSeats} R={GlobalCopies}");
 
-            if (PropRouter.IsSeeded(BookId, InstanceId))
+            string seedReason;
+            if (PropRouter.IsSeeded(BookId, InstanceId, routerLease, out seedReason))
             {
-                Print($"[{EntrySignalName}]    {reason}");
+                Print($"[{EntrySignalName}]    {seedReason}");
             }
             else
             {
-                Print($"[{EntrySignalName}] ⛔ PEAK NOT SEEDED — {reason}");
+                Print($"[{EntrySignalName}] ⛔ PEAK NOT SEEDED — {seedReason}");
                 Print($"[{EntrySignalName}] ⛔ This seat will publish state but will NEVER be selected. " +
-                      $"Add its row to peaks_{BookId}.csv (account name must match '{Account.Name}' exactly), " +
-                      $"then restart the strategy.");
+                      $"Add or correct its row in peaks_{BookId}.csv (the account part before '!' must match " +
+                      $"'{Account.Name}'), " +
+                      $"then fully restart NinjaTrader so the static book reloads the file.");
             }
         }
 
         private void ReleaseSeat()
         {
-            if (accountSubscribed && Account != null)
-            {
-                Account.AccountItemUpdate -= OnAccountItemUpdate;
-                accountSubscribed = false;
-            }
-
             if (routerRegistered)
             {
-                PropRouter.Unregister(BookId, InstanceId);
+                PublishStatus();
+                string reason;
+                if (!PropRouter.Unregister(BookId, InstanceId, routerLease, out reason))
+                    ReportRouterFailure("unregister", reason);
+                else
+                    Print($"[{EntrySignalName}] router lease released — {reason}");
                 routerRegistered = false;
+                routerLease = Guid.Empty;
             }
         }
 
-        private void OnAccountItemUpdate(object sender, AccountItemEventArgs e)
+        protected override void OnAccountItemUpdate(Account account, AccountItem accountItem, double value)
         {
-            if (e == null || !routerRegistered)
+            if (!routerRegistered || account == null || Account == null
+                || !string.Equals(account.Name, Account.Name, StringComparison.OrdinalIgnoreCase))
                 return;
 
             AccountItem watched = UseUnrealizedEquity ? AccountItem.NetLiquidation : AccountItem.CashValue;
-            if (e.AccountItem != watched)
+            if (accountItem != watched)
                 return;
 
-            PropRouter.PublishEquity(BookId, InstanceId, e.Value, IsAccountConnected());
+            // Preserve every callback high monotonically, but do not use a possibly delayed
+            // callback as current equity. Re-read current account state under a separate
+            // serialization lock for the headroom snapshot.
+            string reason;
+            if (!PropRouter.ObservePeak(BookId, InstanceId, routerLease, value, out reason))
+                ReportRouterFailure("observe peak", reason);
+            PublishEquity();
+        }
+
+        protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
+        {
+            if (State != State.Realtime || !routerRegistered)
+                return;
+
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastRouterHeartbeatUtc).TotalSeconds < 5.0)
+                return;
+
+            lastRouterHeartbeatUtc = now;
+            PublishEquity();
+            PublishStatus();
+        }
+
+        private bool ValidateStartup(out string reason)
+        {
+            if (Account == null)
+            {
+                reason = "no account is assigned";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(BookId))
+            {
+                reason = "Book ID is empty";
+                return false;
+            }
+            if (!Enum.IsDefined(typeof(PropRouterMode), RoutingMode))
+            {
+                reason = $"Routing Mode value {(int)RoutingMode} is invalid";
+                return false;
+            }
+            if (GlobalCopies <= 0 || ExpectedSeats <= 0 || ExpectedSeats < GlobalCopies)
+            {
+                reason = $"Expected seats ({ExpectedSeats}) is smaller than R ({GlobalCopies})";
+                return false;
+            }
+            if (InstanceId < 1 || InstanceId > ExpectedSeats)
+            {
+                reason = $"Instance ID {InstanceId} is outside the required 1..{ExpectedSeats} range";
+                return false;
+            }
+            if (SeatStartBalance <= 0 || double.IsNaN(SeatStartBalance) || double.IsInfinity(SeatStartBalance)
+                || SeatDrawdown <= 0 || double.IsNaN(SeatDrawdown) || double.IsInfinity(SeatDrawdown)
+                || SeatFrozenOffset < 0 || double.IsNaN(SeatFrozenOffset) || double.IsInfinity(SeatFrozenOffset)
+                || ExitOffset < 0)
+            {
+                reason = "seat start balance/drawdown/frozen offset or exit offset is invalid";
+                return false;
+            }
+            if (windowRiskRewards == null || windowRiskRewards.Length != 24)
+            {
+                reason = "the 24-value window R:R configuration is unavailable";
+                return false;
+            }
+            for (int i = 0; i < windowRiskRewards.Length; i++)
+            {
+                double rr = windowRiskRewards[i];
+                if (rr < 0 || double.IsNaN(rr) || double.IsInfinity(rr))
+                {
+                    reason = $"window R:R at hour {i:00} is invalid";
+                    return false;
+                }
+            }
+            if (Instrument == null || Instrument.MasterInstrument == null
+                || BarsPeriod == null || Bars == null || Bars.TradingHours == null
+                || TickSize <= 0 || double.IsNaN(TickSize) || double.IsInfinity(TickSize)
+                || Instrument.MasterInstrument.PointValue <= 0
+                || double.IsNaN(Instrument.MasterInstrument.PointValue)
+                || double.IsInfinity(Instrument.MasterInstrument.PointValue))
+            {
+                reason = "instrument, bars, Trading Hours, tick size or point value is unavailable/invalid";
+                return false;
+            }
+            if (EntryQuantity != 1)
+            {
+                reason = $"entry quantity is {EntryQuantity}; this version is interlocked to one contract " +
+                         "until multi-contract partial-fill handling is implemented and tested";
+                return false;
+            }
+            if (PositionAccount != null && PositionAccount.MarketPosition != MarketPosition.Flat)
+            {
+                reason = $"account position is {PositionAccount.MarketPosition}; this strategy cannot adopt " +
+                         "or safely reconstruct an existing position";
+                return false;
+            }
+
+            try
+            {
+                lock (Account.Orders)
+                {
+                    foreach (Order order in Account.Orders)
+                    {
+                        if (order == null || order.Instrument == null || Instrument == null)
+                            continue;
+                        if (!string.Equals(order.Instrument.FullName, Instrument.FullName,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (IsOurSignalName(order.Name) && IsActiveOrder(order))
+                        {
+                            reason = $"existing non-terminal order '{order.Name}' ({order.OrderState}) was found; " +
+                                     "restart/adoption is not implemented";
+                            return false;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                reason = $"could not verify existing account orders: {ex.Message}";
+                return false;
+            }
+
+            reason = "ok";
+            return true;
+        }
+
+        private bool IsOurSignalName(string name)
+        {
+            // Block adoption under a changed InstanceId too: an old broker-held order
+            // from any instance of this strategy family must be resolved first.
+            if (string.IsNullOrEmpty(name))
+                return false;
+            return name.StartsWith("Long1_", StringComparison.Ordinal)
+                || name.StartsWith("StopLimit_", StringComparison.Ordinal)
+                || name.StartsWith("RR_Limit_", StringComparison.Ordinal)
+                || name.StartsWith("DailyFlatten_", StringComparison.Ordinal)
+                || name.StartsWith("InvalidStopExit_", StringComparison.Ordinal);
+        }
+
+        private string BuildRouterConfigKey()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("router-v2");
+            sb.Append("|instrument=").Append(Instrument == null ? "?" : Instrument.FullName);
+            sb.Append("|bars=").Append(BarsPeriod == null ? "?" : BarsPeriod.ToString());
+            sb.Append("|hours=").Append(Bars == null || Bars.TradingHours == null ? "?" : Bars.TradingHours.Name);
+            sb.Append("|calculate=").Append(Calculate);
+            sb.Append("|routing_mode=").Append(RoutingMode);
+            sb.Append("|quantity=").Append(EntryQuantity);
+            sb.Append("|exit_offset=").Append(ExitOffset);
+            sb.Append("|frozen_offset=").Append(SeatFrozenOffset.ToString("R", CultureInfo.InvariantCulture));
+            sb.Append("|unrealized_equity=").Append(UseUnrealizedEquity);
+            sb.Append("|require_stop_cover=").Append(RequireHeadroomCoversStop);
+            sb.Append("|rr=");
+            if (windowRiskRewards != null)
+            {
+                for (int i = 0; i < windowRiskRewards.Length; i++)
+                {
+                    if (i > 0) sb.Append(';');
+                    sb.Append(windowRiskRewards[i].ToString("R", CultureInfo.InvariantCulture));
+                }
+            }
+            return sb.ToString();
         }
 
         private bool IsAccountConnected()
@@ -571,20 +768,37 @@ namespace NinjaTrader.NinjaScript.Strategies
             catch { return false; }
         }
 
+        private bool IsRouterConnectedAndHealthy()
+        {
+            return !startupBlocked && IsAccountConnected();
+        }
+
         private void PublishEquity()
         {
             if (!routerRegistered || Account == null)
                 return;
 
-            try
+            lock (routerEquitySync)
             {
-                double equity = UseUnrealizedEquity
-                    ? Account.Get(AccountItem.NetLiquidation, Currency.UsDollar)
-                    : Account.Get(AccountItem.CashValue, Currency.UsDollar);
+                if (!routerRegistered || Account == null)
+                    return;
 
-                PropRouter.PublishEquity(BookId, InstanceId, equity, IsAccountConnected());
+                try
+                {
+                    double equity = UseUnrealizedEquity
+                        ? Account.Get(AccountItem.NetLiquidation, Currency.UsDollar)
+                        : Account.Get(AccountItem.CashValue, Currency.UsDollar);
+
+                    string reason;
+                    if (!PropRouter.PublishEquity(BookId, InstanceId, routerLease,
+                            equity, IsRouterConnectedAndHealthy(), out reason))
+                        ReportRouterFailure("publish equity", reason);
+                }
+                catch (Exception ex)
+                {
+                    Print($"[{EntrySignalName}] ⛔ failed to read account equity: {ex.Message}");
+                }
             }
-            catch { /* a failed read simply leaves the seat's last value in place */ }
         }
 
         private void PublishStatus()
@@ -592,16 +806,91 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!routerRegistered)
                 return;
 
-            SeatStatus status;
+            lock (routerStatusSync)
+            {
+                // Account truth may conservatively upgrade a seat, including after a
+                // manual/external fill. Heartbeats never infer Free and therefore cannot
+                // erase a Pending/InPosition reservation with a stale snapshot.
+                if (PositionAccount != null && PositionAccount.MarketPosition != MarketPosition.Flat)
+                    routerSeatStatus = SeatStatus.InPosition;
+                else if (strategyPositionFlat && routerSeatStatus == SeatStatus.InPosition
+                    && !HasActiveExitOrders())
+                    routerSeatStatus = SeatStatus.Free;
+                PublishStatusLocked();
+            }
+        }
 
-            if (PositionAccount != null && PositionAccount.MarketPosition != MarketPosition.Flat)
-                status = SeatStatus.InPosition;
-            else if (IsActiveOrder(longOrder))
-                status = SeatStatus.Pending;
-            else
-                status = SeatStatus.Free;
+        private void SetRouterStatus(SeatStatus status)
+        {
+            lock (routerStatusSync)
+            {
+                routerSeatStatus = status;
+                PublishStatusLocked();
+            }
+        }
 
-            PropRouter.PublishStatus(BookId, InstanceId, status, IsAccountConnected());
+        private void PublishStatusLocked()
+        {
+            if (!routerRegistered)
+                return;
+
+            string reason;
+            if (!PropRouter.PublishStatus(BookId, InstanceId, routerLease,
+                    routerSeatStatus, IsRouterConnectedAndHealthy(), out reason))
+                ReportRouterFailure("publish status", reason);
+        }
+
+        private void ApplyEntryOrderStatus(OrderState state)
+        {
+            lock (routerStatusSync)
+            {
+                // Never let a delayed order callback downgrade a confirmed fill.
+                if (routerSeatStatus != SeatStatus.InPosition)
+                {
+                    if (state == OrderState.Cancelled || state == OrderState.Rejected)
+                        routerSeatStatus = PositionAccount != null
+                            && PositionAccount.MarketPosition != MarketPosition.Flat
+                            ? SeatStatus.InPosition : SeatStatus.Free;
+                    else if (state == OrderState.Filled || IsActiveOrderState(state))
+                        routerSeatStatus = SeatStatus.Pending;
+                }
+                PublishStatusLocked();
+            }
+        }
+
+        private bool HasSeatReservation()
+        {
+            lock (routerStatusSync)
+                return routerSeatStatus != SeatStatus.Free;
+        }
+
+        private void RefreshFlatRouterStatus()
+        {
+            lock (routerStatusSync)
+            {
+                if (!strategyPositionFlat)
+                    routerSeatStatus = SeatStatus.InPosition;
+                else if (routerSeatStatus != SeatStatus.Pending)
+                    routerSeatStatus = HasActiveExitOrders()
+                        || (PositionAccount != null
+                            && PositionAccount.MarketPosition != MarketPosition.Flat)
+                        ? SeatStatus.InPosition : SeatStatus.Free;
+
+                PublishStatusLocked();
+            }
+        }
+
+        private void ReportRouterFailure(string operation, string reason)
+        {
+            string message = operation + ": " + (string.IsNullOrWhiteSpace(reason) ? "unknown failure" : reason);
+            DateTime now = DateTime.UtcNow;
+            if (!string.Equals(message, lastRouterFailure, StringComparison.Ordinal)
+                || (now - lastRouterFailureUtc).TotalSeconds >= 30.0)
+            {
+                Print($"[{EntrySignalName}] ⛔ ROUTER FAILURE — {message}");
+                lastRouterFailure = message;
+                lastRouterFailureUtc = now;
+            }
         }
 
         /// <summary>
@@ -609,27 +898,31 @@ namespace NinjaTrader.NinjaScript.Strategies
         /// Must be called only AFTER every local disqualifier (window, R:R, gap) has passed —
         /// a seat that would refuse the trade anyway must never consume an allocation slot.
         /// </summary>
-        private bool MayEnter()
+        private bool MayEnter(double candidateRisk)
         {
-            if (RoutingMode == PropRouterMode.Unrouted)
-                return true;
+            if (startupBlocked)
+                return false;
 
-            // Already carrying this signal: re-pricing a working entry is a continuation,
-            // not a new copy, so it does not go back through the router.
-            if (IsActiveOrder(longOrder))
+            if (RoutingMode == PropRouterMode.Unrouted)
                 return true;
 
             PublishEquity();
             PublishStatus();
 
             double requiredHeadroom = RequireHeadroomCoversStop
-                ? riskPerTrade * Instrument.MasterInstrument.PointValue * EntryQuantity
+                ? candidateRisk * Instrument.MasterInstrument.PointValue * EntryQuantity
                 : 0.0;
 
             if (RoutingMode == PropRouterMode.UnroutedLogOnly)
             {
+                if (!routerRegistered)
+                {
+                    Print($"[{Time[0]}] [{EntrySignalName}] ⚠️ log-only router preview unavailable; " +
+                          "ENTRY STILL SUBMITTED because this mode is unrouted");
+                    return true;
+                }
                 Print($"[{Time[0]}] [{EntrySignalName}] 👁 log-only, ENTRY STILL SUBMITTED — " +
-                      PropRouter.Preview(BookId, InstanceId, GlobalCopies, requiredHeadroom));
+                      PropRouter.Preview(BookId, InstanceId, routerLease, GlobalCopies, requiredHeadroom));
                 return true;
             }
 
@@ -641,7 +934,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             string reason;
-            bool granted = PropRouter.TryClaim(BookId, InstanceId, Time[0], GlobalCopies, requiredHeadroom, out reason);
+            bool granted;
+            lock (routerStatusSync)
+            {
+                granted = PropRouter.TryClaim(BookId, InstanceId, routerLease,
+                    Time[0], GlobalCopies, requiredHeadroom, out reason);
+                if (granted)
+                {
+                    // TryClaim atomically marks the router seat Pending. Mirror that
+                    // state before releasing the local lock so no heartbeat can
+                    // publish an older Free state into the reservation window.
+                    routerSeatStatus = SeatStatus.Pending;
+                    PublishStatusLocked();
+                }
+            }
 
             Print($"[{Time[0]}] [{EntrySignalName}] {(granted ? "✅ routed here" : "↪ not routed here")} — {reason}");
             return granted;
@@ -659,13 +965,24 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool IsActiveOrder(Order order)
         {
-            return order != null &&
-                (order.OrderState == OrderState.Submitted ||
-                 order.OrderState == OrderState.Accepted ||
-                 order.OrderState == OrderState.Working ||
-                 order.OrderState == OrderState.PartFilled ||
-                 order.OrderState == OrderState.ChangeSubmitted ||
-                 order.OrderState == OrderState.CancelSubmitted);
+            return order != null && IsActiveOrderState(order.OrderState);
+        }
+
+        private bool IsActiveOrderState(OrderState state)
+        {
+            return state == OrderState.Initialized ||
+                   state == OrderState.TriggerPending ||
+                   state == OrderState.Submitted ||
+                   state == OrderState.Accepted ||
+                   state == OrderState.AcceptedByRisk ||
+                   state == OrderState.Working ||
+                   state == OrderState.Suspended ||
+                   state == OrderState.PartFilled ||
+                   state == OrderState.ChangePending ||
+                   state == OrderState.ChangeSubmitted ||
+                   state == OrderState.CancelPending ||
+                   state == OrderState.CancelSubmitted ||
+                   state == OrderState.Unknown;
         }
 
         private void TrackOrder(List<Order> orders, Order order)
@@ -673,32 +990,79 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (order == null)
                 return;
 
-            for (int i = 0; i < orders.Count; i++)
+            lock (exitOrdersSync)
             {
-                if (orders[i] == order || orders[i].OrderId == order.OrderId)
+                for (int i = 0; i < orders.Count; i++)
                 {
-                    orders[i] = order;
-                    return;
+                    if (orders[i] == order || orders[i].OrderId == order.OrderId)
+                    {
+                        orders[i] = order;
+                        return;
+                    }
                 }
-            }
 
-            orders.Add(order);
+                orders.Add(order);
+            }
         }
 
         private void CancelActiveOrders(List<Order> orders)
         {
-            foreach (Order order in orders.ToArray())
+            Order[] snapshot;
+            lock (exitOrdersSync)
+                snapshot = orders.ToArray();
+
+            foreach (Order order in snapshot)
             {
                 if (IsActiveOrder(order))
                     CancelOrder(order);
             }
         }
 
+        private bool HasActiveExitOrders()
+        {
+            lock (exitOrdersSync)
+            {
+                foreach (Order order in stopOrders)
+                    if (IsActiveOrder(order))
+                        return true;
+                foreach (Order order in takeProfitOrders)
+                    if (IsActiveOrder(order))
+                        return true;
+                return false;
+            }
+        }
+
+        private bool HasTrackedExitState()
+        {
+            lock (exitOrdersSync)
+                return takeProfitSubmitted || stopOrders.Count > 0 || takeProfitOrders.Count > 0;
+        }
+
+        private bool TryMarkTakeProfitSubmitted()
+        {
+            lock (exitOrdersSync)
+            {
+                if (takeProfitSubmitted)
+                    return false;
+                takeProfitSubmitted = true;
+                return true;
+            }
+        }
+
+        private void ClearTakeProfitSubmitted()
+        {
+            lock (exitOrdersSync)
+                takeProfitSubmitted = false;
+        }
+
         private void ResetExitTracking()
         {
-            takeProfitSubmitted = false;
-            stopOrders.Clear();
-            takeProfitOrders.Clear();
+            lock (exitOrdersSync)
+            {
+                takeProfitSubmitted = false;
+                stopOrders.Clear();
+                takeProfitOrders.Clear();
+            }
         }
 
         protected override void OnBarUpdate()
@@ -711,19 +1075,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             PublishStatus();
 
             // === End of session FLATTEN LOGIC ===
-            if (ToTime(Time[0]) >= 235700 && ToTime(Time[0]) < 235800)
+            // Once the cutoff is reached, remain disarmed through midnight. The old one-minute
+            // window allowed a fresh 23:58/23:59 entry and missed the action on coarser bars.
+            if (ToTime(Time[0]) >= 235700)
 			{
 				if (lastFlattenDate.Date != Time[0].Date)
 				{
 					lastFlattenDate = Time[0];
-					Print($"[{Time[0]}] [{EntrySignalName}] ❌ End of session FLATTEN → all positions & orders cleared");
+					Print($"[{Time[0]}] [{EntrySignalName}] ❌ End-of-day cutoff reached → " +
+                          "flatten/cancel requested; new entries remain blocked through midnight");
 
 					if (Position.MarketPosition == MarketPosition.Long)
 						ExitLong(FlattenName, EntrySignalName);
 
-					if (longOrder != null &&
-						(longOrder.OrderState == OrderState.Working ||
-						 longOrder.OrderState == OrderState.Accepted))
+					if (IsActiveOrder(longOrder))
 						CancelOrder(longOrder);
 				}
 				return;
@@ -738,14 +1103,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 double targetPrice = Instrument.MasterInstrument.RoundToTickSize(entryPrice + (riskPerTrade * positionRiskReward));
 
-				if (!takeProfitSubmitted && positionRiskReward > 0 && Close[0] >= targetPrice)
+				if (positionRiskReward > 0 && Close[0] >= targetPrice
+                    && TryMarkTakeProfitSubmitted())
 				{
 					double exitLimitPrice = Instrument.MasterInstrument.RoundToTickSize(Close[0] + (ExitOffset * TickSize));
 
 					Print($"[{Time[0]}] [{EntrySignalName}] {positionRiskReward}R reached: Bar Close={Close[0]}, Target={targetPrice}");
-					ExitLongLimit(0, true, Position.Quantity, exitLimitPrice, TakeProfitName, EntrySignalName);
-                    takeProfitSubmitted = true;
-					Print($"[{Time[0]}] [{EntrySignalName}] Limit order submitted @ {exitLimitPrice} (target={targetPrice}, offset={ExitOffset} ticks, signal={TakeProfitName})");
+					Order targetOrder = ExitLongLimit(0, true, Position.Quantity,
+                        exitLimitPrice, TakeProfitName, EntrySignalName);
+                    if (targetOrder == null)
+                    {
+                        ClearTakeProfitSubmitted();
+                        startupBlocked = true;
+                        PublishStatus();
+                        Print($"[{Time[0]}] [{EntrySignalName}] ⛔ take-profit API returned no Order object; new entries disarmed");
+                    }
+                    else
+                    {
+                        TrackOrder(takeProfitOrders, targetOrder);
+					    Print($"[{Time[0]}] [{EntrySignalName}] Limit order submitted @ {exitLimitPrice} (target={targetPrice}, offset={ExitOffset} ticks, signal={TakeProfitName})");
+                    }
 				}
 				return;
 			}
@@ -754,7 +1131,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
 
             // 🔹 TRADE WINDOW (ENTRY ONLY)
-            if (takeProfitSubmitted || stopOrders.Count > 0 || takeProfitOrders.Count > 0)
+            if (HasActiveExitOrders())
+            {
+                Print($"[{Time[0]}] [{EntrySignalName}] ⛔ flat but a prior exit order is still non-terminal → no new entry");
+                return;
+            }
+            if (HasTrackedExitState())
                 ResetExitTracking();
 
             bool inWindow = IsTradeWindow(Time[0]);
@@ -767,8 +1149,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (!inWindow)
             {
-                if (longOrder != null &&
-                    (longOrder.OrderState == OrderState.Working || longOrder.OrderState == OrderState.Accepted))
+                if (IsActiveOrder(longOrder))
                 {
                     Print($"[{Time[0]}] [{EntrySignalName}] ⏱ Outside window → cancelling pending order @ {longOrder.StopPrice}");
                     CancelOrder(longOrder);
@@ -776,42 +1157,80 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
+            // Do not modify a broker-held entry in place. OnExecutionUpdate can interleave
+            // with a managed change request; freezing the accepted setup prevents an old
+            // fill from inheriting a newer candle's stop/R:R. Ambiguous reservations also
+            // remain quarantined until an authoritative terminal callback.
+            if (IsActiveOrder(longOrder) || HasSeatReservation())
+            {
+                Print($"[{Time[0]}] [{EntrySignalName}] existing entry reservation remains unchanged → no repricing");
+                return;
+            }
+
             // 🔹 Red candle logic
 			/// ENTRY BLOCK
             if (Close[0] < Open[0])
 			{
-				entryPrice = High[0];
-				pendingStopPrice = Low[0];
-				riskPerTrade = entryPrice - pendingStopPrice;
-				pendingRiskReward = GetWindowRiskReward(Time[0]);
-				Print($"[{Time[0]}] [{EntrySignalName}] Window R:R={pendingRiskReward}");
+                // Keep the working order's accepted setup immutable while evaluating a
+                // replacement. A skipped/gapped candidate must not overwrite the stop/R:R
+                // later used if the older broker order fills.
+				double candidateEntryPrice = High[0];
+				double candidateStopPrice = Low[0];
+				double candidateRisk = candidateEntryPrice - candidateStopPrice;
+				double candidateRiskReward = GetWindowRiskReward(Time[0]);
+				Print($"[{Time[0]}] [{EntrySignalName}] Window R:R={candidateRiskReward}");
 
-                if (pendingRiskReward <= 0)
+                if (candidateRiskReward <= 0 || candidateRisk <= 0)
                 {
-                    Print($"[{Time[0]}] [{EntrySignalName}] Window R:R is 0 - skipping entry");
+                    Print($"[{Time[0]}] [{EntrySignalName}] Invalid R:R or candle risk - skipping entry");
                     return;
                 }
 
 				Print($"[{Time[0]}] [{EntrySignalName}] 🔴 Red candle detected -> evaluating entry");
-				Print($"[{Time[0]}] [{EntrySignalName}] Entry={entryPrice} SL={pendingStopPrice} Risk={riskPerTrade}");
+				Print($"[{Time[0]}] [{EntrySignalName}] Entry={candidateEntryPrice} SL={candidateStopPrice} Risk={candidateRisk}");
 
 				double ask = GetCurrentAsk();
 
-				if (ask >= entryPrice)
+				if (ask >= candidateEntryPrice)
 				{
 					Print($"[{Time[0]}] [{EntrySignalName}] ⚠️ Gap above entry → skipping stop placement");
 					return;
 				}
 
                 // === ROUTING GATE — every local disqualifier has now passed ===
-                if (!MayEnter())
+                if (!MayEnter(candidateRisk))
                     return;
 
+				entryPrice = candidateEntryPrice;
+				pendingStopPrice = candidateStopPrice;
+				riskPerTrade = candidateRisk;
+				pendingRiskReward = candidateRiskReward;
 				ResetExitTracking();
-				longOrder = EnterLongStopLimit(0, true, EntryQuantity, entryPrice, entryPrice, EntrySignalName);
-				Print($"[{Time[0]}] [{EntrySignalName}] Submitted BUY STOP-LIMIT @ {entryPrice}");
 
-                PublishStatus();
+                // Reserve the exposure before crossing into the managed-order API. Order
+                // callbacks can be synchronous; an ambiguous/null submission stays Pending
+                // and quarantines capacity rather than risking a second broker order.
+                SetRouterStatus(SeatStatus.Pending);
+                try
+                {
+				    longOrder = EnterLongStopLimit(0, true, EntryQuantity, entryPrice, entryPrice, EntrySignalName);
+                    if (longOrder == null)
+                    {
+                        startupBlocked = true;
+                        PublishStatus();
+                        Print($"[{Time[0]}] [{EntrySignalName}] ⛔ entry API returned no Order object; " +
+                              "seat remains Pending and new entries are disarmed until broker state is reconciled");
+                    }
+                    else
+				        Print($"[{Time[0]}] [{EntrySignalName}] Submitted BUY STOP-LIMIT @ {entryPrice}");
+                }
+                catch (Exception ex)
+                {
+                    startupBlocked = true;
+                    PublishStatus();
+                    Print($"[{Time[0]}] [{EntrySignalName}] ⛔ entry submission threw {ex.GetType().Name}: " +
+                          $"{ex.Message}; seat remains Pending until broker state is reconciled");
+                }
 			}
         }
 
@@ -819,47 +1238,112 @@ namespace NinjaTrader.NinjaScript.Strategies
         protected override void OnExecutionUpdate(Execution execution, string executionId,
             double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
         {
-            if (execution.Order != null && execution.Order.Name == EntrySignalName)
+            if (execution != null && execution.Name == EntrySignalName && quantity > 0)
             {
-                takeProfitSubmitted = false;
+                lock (routerStatusSync)
+                    strategyPositionFlat = false;
+                SetRouterStatus(SeatStatus.InPosition);
+                ClearTakeProfitSubmitted();
 
                 if (quantity > 0 && pendingRiskReward > 0)
                     positionRiskReward = pendingRiskReward;
 
                 if (quantity > 0 && pendingStopPrice > 0)
                 {
-                    entryPrice = execution.Order.AverageFillPrice;
+                    entryPrice = price;
 
                     if (pendingStopPrice > 0)
                     {
                         riskPerTrade = entryPrice - pendingStopPrice;
-                        double limitPrice = pendingStopPrice - TickSize;	// Can be used in ExitLongStopLimit (currently 2*pendingStopPrice instead)
+
+                        if (riskPerTrade <= 0)
+                        {
+                            Print($"[{time}] [{EntrySignalName}] ⛔ filled at {entryPrice} with invalid stop " +
+                                  $"{pendingStopPrice}; submitting emergency market exit");
+                            ExitLong(EmergencyExitName, EntrySignalName);
+                            longOrder = null;
+                            return;
+                        }
+
+                        // Study-compatible zero-band stop-limit. This is NOT guaranteed to fill
+                        // through a gap; see README known limitations before live deployment.
+                        double limitPrice = pendingStopPrice;
 
                         Print($"[{time}] [{EntrySignalName}] 🚀 Entry FILLED at {entryPrice} - Submitting STOP-LIMIT immediately");
                         Print($"[{time}] [{EntrySignalName}]    Stop={pendingStopPrice}, Limit={limitPrice}, Risk={riskPerTrade}");
 
-						ExitLongStopLimit(0, true, execution.Order.Filled, pendingStopPrice, pendingStopPrice, StopLossSignalName, EntrySignalName);
+						Order protectiveOrder = ExitLongStopLimit(0, true, quantity,
+                            limitPrice, pendingStopPrice, StopLossSignalName, EntrySignalName);
+                        if (protectiveOrder == null)
+                        {
+                            startupBlocked = true;
+                            PublishStatus();
+                            Print($"[{time}] [{EntrySignalName}] ⛔ protective-stop API returned no Order object; " +
+                                  "submitting emergency market exit");
+                            ExitLong(EmergencyExitName, EntrySignalName);
+                            longOrder = null;
+                            return;
+                        }
+                        TrackOrder(stopOrders, protectiveOrder);
                     }
                 }
 
-                // Clear local reference once our own entry order is filled
-                if (execution.Order.OrderState == OrderState.Filled)
-                {
-                    longOrder = null;
-                }
+                // Startup validation currently enforces quantity=1, so any execution completes
+                // the entry. Multi-contract partial-fill handling is intentionally interlocked.
+                longOrder = null;
             }
+            else
+            {
+                PublishStatus();
+            }
+        }
 
-            PublishStatus();
+        protected override void OnPositionUpdate(Position position, double averagePrice,
+            int quantity, MarketPosition marketPosition)
+        {
+            lock (routerStatusSync)
+            {
+                strategyPositionFlat = marketPosition == MarketPosition.Flat;
+
+                if (!strategyPositionFlat)
+                {
+                    routerSeatStatus = SeatStatus.InPosition;
+                }
+                else if (routerSeatStatus != SeatStatus.Pending)
+                {
+                    // Account state may lag this strategy callback for some providers.
+                    // Keep InPosition until account truth also reports flat; a later
+                    // heartbeat then performs the conservative downgrade to Free.
+                    routerSeatStatus = HasActiveExitOrders()
+                        || (PositionAccount != null
+                            && PositionAccount.MarketPosition != MarketPosition.Flat)
+                        ? SeatStatus.InPosition : SeatStatus.Free;
+                }
+
+                PublishStatusLocked();
+            }
         }
 
         protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice,
             int quantity, int filled, double averageFillPrice, OrderState orderState,
             DateTime time, ErrorCode error, string nativeError)
         {
+            if (order == null)
+                return;
+
+            if (error != ErrorCode.NoError || orderState == OrderState.Rejected)
+            {
+                startupBlocked = true;
+                Print($"[{time}] [{EntrySignalName}] ⛔ ORDER ERROR name={order.Name} state={orderState} " +
+                      $"error={error} broker='{nativeError}'. New entries are disarmed; " +
+                      "StopCancelClose will apply NinjaTrader's fail-safe handling.");
+            }
+
             // Only track orders that belong to this instance
             if (order.Name == EntrySignalName)
             {
                 longOrder = order;
+                ApplyEntryOrderStatus(orderState);
             }
             else if (order.Name == StopLossSignalName)
             {
@@ -873,13 +1357,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 TrackOrder(takeProfitOrders, order);
 
                 if (orderState == OrderState.Cancelled || orderState == OrderState.Rejected)
-                    takeProfitSubmitted = false;
+                    ClearTakeProfitSubmitted();
 
                 if (orderState == OrderState.Filled)
                     CancelActiveOrders(stopOrders);
             }
 
-            PublishStatus();
+            if (order.Name == StopLossSignalName || order.Name == TakeProfitName)
+                RefreshFlatRouterStatus();
+            else if (order.Name != EntrySignalName)
+                PublishStatus();
         }
     }
 }

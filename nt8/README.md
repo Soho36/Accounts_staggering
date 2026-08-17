@@ -1,39 +1,145 @@
-# NT8 max_headroom signal router
+# NT8 max-headroom signal router
 
-Two files:
+> **SIMULATION / PLAYBACK ONLY — NOT LIVE-READY**
+>
+> These scripts are a prototype translation of the Account_staggering study into
+> NinjaTrader 8. Use them only with Playback and separately named simulation
+> accounts. Do not attach either unrouted mode to a live account: neither is a
+> dry run. Do not promote this version to live trading until every release-gate
+> test below passes and the unresolved exit and allocation risks are either fixed
+> or explicitly accepted.
 
-| File | Goes in |
+## Files and scope
+
+| File | NinjaTrader location |
 |---|---|
 | `PropRouter.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
-| `RR_..._SafeExits_Routed.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` |
+| `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits_Routed.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` |
+| `tests\*` | local regression harness only; do not copy into NinjaTrader |
 
-The strategy's trading logic is byte-identical to
-`RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits(EXAMPLE).cs`
-apart from two inserted lines in the entry block (the routing gate) and status
-publishing. Everything downstream of the entry — stop-limit placement, the R:R
-limit exit, safe exits, the 23:57 flatten — is untouched.
+The routed strategy is derived from
+`RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits(EXAMPLE).cs`,
+but it is **not byte-identical** to that file. The red-candle signal, stop-limit
+entry, window R:R calculation and general exit shape remain recognizable.
+Routing, startup validation, state publication, order-state handling, error
+handling and the end-of-day cutoff have all been changed. Treat this as a new
+strategy variant and regression-test the complete order lifecycle.
 
-## Model
+The self-contained router regression suite compiles the real `PropRouter.cs`
+against a minimal `Globals.UserDataDir` stub:
 
-Matches `account_farming.py` and `addiotional_helpers/signal_router.py` exactly:
-
+```powershell
+& .\tests\run-router-tests.ps1
 ```
-floor    = min(peak - dd, start + 100)      # peak = high-water mark of NetLiquidation
+
+The current suite has 15 cases covering durable row preservation, strict CSV
+parsing, manifest/quorum readiness, atomic pending reservations, delayed-winner
+revalidation, transient peak capture, ownership/leases and fail-closed invalid
+state. It does **not** emulate NinjaTrader's managed-order engine; the Playback
+checklist remains mandatory for the strategy and broker lifecycle.
+
+## Model and exposure
+
+The core max-headroom ranking is:
+
+```text
+floor    = min(peak - dd, start + 100)
 headroom = equity - floor
-select   = sorted(free_seats, key=(-headroom, trades_taken, instance_id))[:need]
-need     = R - (seats already holding an unfilled entry order)
+need     = max(0, R - seats with a pending entry reservation/order)
+select   = sorted(eligible_free_seats,
+                  key=(-headroom, trades_taken, instance_id))[:need]
 ```
 
-`headroom` is the same quantity as the **Cushion** column you compute from the
-broker sheet: `balance − auto-liquidate threshold`. The threshold *is* the floor.
+`peak` and `equity` use NetLiquidation when **Track peak on unrealized** is
+`true`, and CashValue when it is `false`.
 
-Seats holding a **position** are invisible to the router. That is the overlap
-which forces `K > R`, and it is why total open contracts can exceed R.
+`R` counts selected **seats**, not arbitrary contract quantity. This version
+has a startup interlock that requires every seat to submit exactly one contract,
+so `R=1` means at most one new one-contract seat is selected for a decision.
+Positions from older signals are busy and excluded from the next allocation;
+they do not count against `R`. Consequently, overlapping signals can still
+produce more than `R` total open contracts across the book.
 
-## Per-seat settings
+The study found `K >= 5R` as its observed full-capacity boundary. For this
+six-seat pilot, `K=6` and `R=1` satisfy that study boundary, but this is not a
+guarantee of live fills, survival or profitability.
 
-All six charts: same instrument, same timeframe, all 23 windows enabled with the
-same R:R values. Only Instance ID, starting balance and drawdown differ.
+### Full-book quorum and eligibility
+
+Routed mode fails closed unless all of the following are true:
+
+1. The book manifest exists and every registered instance agrees on
+   **Expected seats**, `R`, and the configuration fingerprint.
+2. Exactly `ExpectedSeats` seats are registered, with every Instance ID from
+   `1` through `ExpectedSeats` present once.
+3. Every seat is connected, seeded, has valid equity and peak data, and has both
+   equity and status updates no more than 20 seconds old.
+4. Peak persistence is healthy.
+
+Only after the full book is ready can a seat be eligible. An eligible winner
+must also be `Free`, have positive headroom, and—when **Require headroom covers
+stop** is enabled—have headroom at least equal to the candidate candle's nominal
+initial stop risk.
+
+A granted or working entry remains `Pending` and reserved in the `R` count. A filled position remains
+registered and must stay fresh, but is invisible to winner selection until it is
+flat. If any one of the six seats disconnects, becomes stale, loses a valid seed,
+or makes persistence unhealthy, the entire book refuses new routed entries.
+Existing broker orders and positions are not automatically cancelled by that
+router refusal.
+
+Market-data events publish a heartbeat at most every five seconds, and bar/order
+events also publish state. Playback must therefore be running and delivering
+market data. A quiet or paused feed can intentionally make the book stale and
+fail closed.
+
+### Book manifest, decision key and leases
+
+The first registered seat establishes an in-memory manifest containing:
+
+- expected seat count and `R`;
+- instrument;
+- BarsPeriod;
+- Trading Hours template;
+- `Calculate` mode;
+- routing mode (so `Routed` and `UnroutedLogOnly` cannot share a manifest);
+- one-contract quantity;
+- exit offset;
+- frozen-floor offset;
+- NetLiquidation versus CashValue equity source;
+- the headroom-covers-stop setting;
+- all 24 window R:R values.
+
+A mismatch refuses registration. The manifest does not replace operator review:
+all six seats must also use the intended account-specific start balance and
+drawdown. A Book ID must contain only ASCII
+letters, digits, hyphens or underscores and must identify one exact signal stream.
+Never reuse a Book ID for another instrument, timeframe, Trading Hours template,
+strategy variant, or simulation/live environment.
+
+Decisions are cached inside a book by the full `Time[0].Ticks` bar timestamp.
+The first claimant computes the winners; later claimants must present the same
+`R`, required headroom and topology. All six series must therefore produce the
+same bar timestamps, not merely look like the same timeframe.
+
+Registration returns a private lease. Every later seat-specific router call must
+carry that lease, so callbacks from an old strategy instance cannot mutate a new
+owner. Duplicate Instance IDs and duplicate normalized account names are
+refused. Account-name ownership is global across router books because one broker
+account is one shared drawdown container. A stale `Free` owner can be replaced
+inside its existing book; a `Pending` or `InPosition` reservation is not stolen
+even when its heartbeat is stale.
+
+The manifest, leases and decision cache are in memory. A full NT8 process restart
+clears them. `trades_taken` is also in memory and resets on restart.
+Disabling and re-enabling a strategy does not reset the static book. After
+changing a loaded seed file or manifest field, fully restart NT8 while every
+account is flat and has no working orders.
+
+## Intended six-seat settings
+
+These are the real-account parameters used to translate the study. They are
+reference data only while this version remains simulation/playback-only.
 
 | Account | Instance ID | Start balance | Drawdown | Tier |
 |---|---:|---:|---:|---|
@@ -44,114 +150,134 @@ same R:R values. Only Instance ID, starting balance and drawdown differ.
 | PA-APEX-240737-14 | 5 | 50000 | 2500 | 50K |
 | PA-APEX-240737-15 | 6 | 50000 | 2500 | 50K |
 
-Identical on every chart:
+For Playback, create **six distinct simulation accounts**, one per seat. Do not
+use six charts all assigned to Sim101. Shared Sim101 charts share account equity
+and account-level position state, so they do not emulate six independent
+drawdown containers. Give the simulation accounts stable, unique names and use
+those names in the Playback seed file.
+
+Common settings for all six Playback instances:
 
 | Property | Value |
 |---|---|
-| Routing Mode | `UnroutedLogOnly` at first **with the legacy window split**, then `Routed` — see below |
-| Book ID | `LIVE` (use a different ID for any Sim101 chart) |
+| Account | one distinct simulation account per seat |
+| Routing Mode | `Routed` for allocation tests |
+| Book ID | a simulation-only ID, for example `PLAYBACK_ROUTER_V2` |
 | R — copies per signal | `1` |
+| Expected seats in book | `6` |
+| Entry quantity | exactly `1` contract |
+| Exit Offset | identical on every seat; `0` for study-compatible tests |
 | Frozen floor offset | `100` |
-| Track peak on unrealized | `true` |
-| Require headroom covers stop | `false` (matches the study; `true` adds a safety filter) |
+| Track peak on unrealized | `true` for this six-seat model |
+| Require headroom covers stop | `false` to match the study; test `true` separately |
+| Instrument, BarsPeriod, Trading Hours | identical |
+| Window R:R values | identical |
 
-### Window Risk/Reward
+The code enforces one contract even in an unrouted mode. Either set the strategy
+default quantity to one, or enable **Use Custom Quantity** and set **Custom
+Quantity** to one.
 
-The strategy has no separate window on/off switch — `W00..W23` are derived from
-the R:R values, and `IsTradeWindow()` is just `RR > 0`. **A window with R:R = 0
-is disabled.** With every field left at 0, as they ship, the strategy never
-trades.
+## Window R:R and NinjaTrader time
 
-The study's canonical set is `range(1, 24)` — hours 01 through 23, which is 23
-windows. `00:00–01:00` is **not** among them and has no sweep data behind it:
+There is no separate operator-visible window switch. The hidden legacy
+`W00..W23` values are overwritten from the R:R fields at DataLoaded:
+
+- R:R greater than zero enables that hour and supplies its target multiple.
+- R:R equal to zero disables that hour.
+- All R:R values default to zero, so a newly added strategy does not trade.
+
+The study's canonical signal universe is hours 01 through 23:
 
 | Field | Value |
 |---|---|
-| `00:00-01:00` | `0` — outside the study's window set, leave disabled |
-| `01:00-02:00` … `23:00-00:00` | `1` — all 23 windows, global R:R of 1 |
+| `00:00-01:00` | `0` — outside the recovered study universe |
+| `01:00-02:00` through `23:00-00:00` | `1` — 23 windows at global R:R 1 |
 
-Same on all six charts. The router study fixed `RR = 1.0`, so a global 1 is the
-setting that makes live behaviour match what was measured.
+`GetWindowRiskReward()` indexes `Time[0].Hour`. That hour is based on
+NinjaTrader's **global application time-zone setting**, not an independent chart
+time zone. Set and record the NT8 global time zone before building the charts.
+Then explicitly map each MT5 export hour into that global NT8 time basis,
+including daylight-saving transitions. Do not copy the 01–23 labels until a
+Playback signal-by-signal comparison proves the mapping.
 
-One thing to confirm yourself: `GetWindowRiskReward()` indexes on `Time[0].Hour`,
-which is the *chart's* timezone. The window numbering has to line up with the
-hours in the MT5 exports. Your existing per-chart configs already encode that
-mapping, so compare against them before overwriting.
+The Trading Hours template controls the session and which bars exist. It is part
+of the manifest. The global time zone is not in the manifest, so it remains a
+manual release check.
 
-### ⚠️ Routing Mode — none of these is a dry run
+The explicit end-of-day branch runs only on an OnBarClose callback whose
+timestamp is at or after 23:57 and still before midnight. Once reached, it
+requests flatten/cancel and blocks later entries that date. A series with no
+23:57–23:59 bar can still miss that explicit branch; the built-in session-close
+exit is a separate backstop. Test the actual BarsPeriod, Trading Hours template
+and global time zone in Playback.
 
-**Every mode submits real orders to the account the chart is set to.** The mode
-controls only whether the router may *veto* an entry. There is no paper-trading
-mode; to trade without real orders, set the chart's Account to **Sim101**.
+The R:R take-profit is also bar-close-driven. It is **not** a resting target
+order placed at entry. Only after a completed bar closes at or above the target
+does the strategy submit a sell limit at `Close + ExitOffset`. Intrabar touches
+that close below the target do not trigger it, and the new limit is not
+guaranteed to fill.
 
-| Mode | Router | Orders on this account |
-|---|---|---|
-| `Routed` | decides | only signals routed here. An unseeded seat is never selected, so this **fails closed** — no seed file, no trades. |
-| `UnroutedLogOnly` | logs what it *would* choose, **never blocks** | **every** signal in every enabled window |
-| `Unrouted` | bypassed | **every** signal in every enabled window |
+Once an entry order is working, its accepted candle stop and R:R are immutable.
+Later red candles do not reprice it; the order remains until it fills, reaches a
+terminal state, or is cancelled outside its window/EOD. This conservative change
+avoids a managed-order race in which an old fill could inherit a new candle's
+risk parameters, but it diverges from the original repricing behavior and needs
+fresh strategy-level outcome comparison.
 
-`UnroutedLogOnly` was previously named `Shadow`, which read as "dry run". It is
-not. It is `Unrouted` plus a log line. Both unrouted modes trade identically.
+## Routing modes — none is a dry run
 
-**The exposure trap.** With the legacy per-chart window split, an unrouted mode
-is harmless — each account still trades only its own hours. But the moment all
-six charts carry all 23 windows, an unrouted mode means *all six accounts take
-every signal*: six copies per signal on a book sized for one, with nothing to
-stop it.
+Every mode can submit orders to the account assigned to the strategy. With a
+simulation account those are simulated orders; with a live account they are
+live orders.
 
-So the window change and the mode change must not be made independently:
+| Mode | Router behavior | Entry behavior | Router CSV |
+|---|---|---|---|
+| `Routed` | manifest, lease, quorum and allocation enforced | only selected seats submit; failures stand down | yes, on the first claim for a new decision |
+| `UnroutedLogOnly` | registers when possible and prints a non-mutating preview | every locally valid signal still submits, even if registration/preview is unavailable | no |
+| `Unrouted` | no router registration | every locally valid signal submits | no |
 
-1. **`UnroutedLogOnly` first, keeping each chart's existing window split.** This
-   validates peaks, floors, account names and persistence without touching
-   exposure. The routing decisions it prints are not meaningful yet — the
-   signals don't coincide — and that is fine, they are not the point.
-2. **Then, in one edit:** set all 23 windows to 1 on all six charts *and* switch
-   every chart to `Routed`. Never all-windows with the gate inactive.
+`UnroutedLogOnly` previews appear only in the NinjaTrader Output window. They
+do not share/cache a routed decision, increment `trades_taken`, or create
+`routing_*.csv`. “Log only” describes the router's observation; it does not
+describe order submission.
 
-The strategy prints a `⚠️ Routing Mode = …: this is NOT a dry run` warning on
-startup in either unrouted mode, naming the account and the enabled window count.
+The startup preflight interlock applies to every mode. However, after preflight
+passes, a router registration or persistence failure blocks `Routed` but does
+**not** stop `UnroutedLogOnly` from submitting entries. This is why no unrouted
+mode belongs on a live account.
 
-The default is `Routed`, chosen because it fails closed: a freshly applied
-strategy with no seeded peak submits nothing at all.
+Never combine all 23 enabled windows with an unrouted mode across six accounts:
+that requests six one-contract copies of every locally valid signal rather than
+`R=1`.
 
-### Book ID
+## EOD accounts and conservative modelling
 
-There is only one live book, so the ID looks redundant. It exists because all
-NinjaScript runs in one process and shares one static registry: a Sim101 chart
-started for testing would otherwise register as a seat alongside the live ones
-and could win live allocations. The Book ID is the namespace that keeps them
-apart, and it also names the state and log files (`peaks_LIVE.csv`,
-`routing_LIVE_*.csv`).
+`-12` and `-13` have no published intraday Auto-Liquidate Threshold because
+they are end-of-day trailing accounts. This model nevertheless sets **Track peak
+on unrealized = true** on all six seats.
 
-Use `LIVE` for the six live charts and something else — `SIM` — for anything on
-Sim101. Every chart in a book must also carry the same `R`.
+Under the assumptions that the observed NetLiquidation high-water mark is at
+least the governing EOD closed-balance high, and that the firm's freeze rule is
+represented correctly, this is conservative:
 
-### On the two EOD accounts
+```text
+peak_modelled >= peak_EOD
+floor_modelled >= floor_real
+headroom_modelled <= headroom_real
+```
 
-`-12` and `-13` have no published Auto-Liquidate Threshold because they are
-**end-of-day** trailing accounts; the other four trail intraday. They are
-nonetheless configured as intraday (`Track peak on unrealized = true`), which is
-deliberate.
+That can route to the two EOD seats less often. It should not be described as
+risk-free: the exact broker definitions, update timing and freeze behavior must
+be reconciled against statements and liquidation thresholds. In particular, it
+remains unverified whether the EOD threshold freezes at `start + 100`. That
+matters once those accounts clear roughly +$2,600.
 
-An intraday peak is always ≥ an EOD peak, so modelling an EOD seat as intraday
-gives `floor_modelled ≥ floor_real` and therefore `headroom_modelled ≤
-headroom_real`. The router will route to those two slightly *less* often than it
-strictly could. That is a small utilisation loss, not a risk. The reverse —
-modelling an intraday seat as EOD — would overstate headroom and route into an
-account thinner than it looks, and must never be done.
+## Peak seeds
 
-Unverified: whether Apex freezes an EOD threshold at the same `start + 100`.
-The code assumes it does. That only matters once these two clear about +$2,600.
+An unseeded seat can publish state but cannot satisfy the full-book quorum.
+Current equity is never allowed to bootstrap a trusted peak.
 
-## Seeding the peaks — do this before anything is enabled
-
-The router will not select a seat whose peak came from anywhere except the seed
-file or an explicit `OverridePeak`. A peak bootstrapped from whatever equity
-happened to be present at startup would put the floor at `equity − dd` and make
-a damaged account look pristine, so an unseeded seat publishes state, logs
-normally, and is never chosen. Both the strategy log and the routing log say so.
-
-Where each seed peak comes from:
+Reference values from the broker sheet:
 
 | Seat | Source | Peak | Floor | Headroom |
 |---|---|---:|---:|---:|
@@ -162,33 +288,34 @@ Where each seed peak comes from:
 | `-14` | threshold + dd | 50838.31 | 48338.31 | 1526.87 |
 | `-15` | threshold + dd | 50844.85 | 48344.85 | 2319.43 |
 
-All four seats with a published threshold reproduce the broker's cushion column
-to the cent, which is the check that the formula is right.
+All four accounts with a published threshold reproduce the broker cushion to the
+cent. For an intraday seat, do not substitute the sheet's closed-balance Peak:
+`-14` would understate its governing peak and floor by $500. For the EOD seats,
+the closed-balance peak is the intended source.
 
-**Use the correct column per account type.** For an intraday seat the sheet's
-Peak column is a closed-balance high and is *wrong* — `-14` shows the gap
-plainly: threshold + dd = 50838.31 but the sheet's Peak reads 50338.31, a $500
-unrealised give-back that never closed. Seeding `-14` from the Peak column would
-understate its floor by $500 and overstate its headroom by the same. For the two
-EOD seats the closed-balance peak *is* the governing peak, so the Peak column is
-exactly right there.
+The current max-headroom ordering is:
 
-Ranked as `max_headroom` currently sees the book:
-
-```
+```text
 1. -09  2993.18      4. -13  2235.89
 2. -10  2570.70      5. -14  1526.87
 3. -15  2319.43      6. -12  1159.71
 ```
 
-Note `-12` is the thinnest seat on the book, $1,340 below its own peak.
+Max-headroom is not a fairness policy. A thinner seat can legitimately receive
+no allocations while a higher-headroom seat remains free. “No starvation” is
+therefore not a valid acceptance criterion.
 
-### The file
+### Strict seed-file contract
 
-`Documents\NinjaTrader 8\PropRouter\peaks_LIVE.csv` — create by hand, folder
-included:
+The file is:
 
+```text
+Documents\NinjaTrader 8\PropRouter\peaks_<book>.csv
 ```
+
+For the future live book, the reference file is:
+
+```csv
 account,start_balance,drawdown,peak,updated_utc
 PA-APEX-240737-09,25000.00,1500.00,26600.00,2026-08-17T00:00:00Z
 PA-APEX-240737-10,25000.00,1500.00,26600.00,2026-08-17T00:00:00Z
@@ -198,78 +325,294 @@ PA-APEX-240737-14,50000.00,2500.00,50838.31,2026-08-17T00:00:00Z
 PA-APEX-240737-15,50000.00,2500.00,50844.85,2026-08-17T00:00:00Z
 ```
 
-Four things that break it silently:
+Playback needs the same shape but must use the six distinct simulation-account
+names and the corresponding configured start balances and drawdowns.
 
-1. **Decimal separator.** The parser uses `InvariantCulture`, so numbers need a
-   period: `25000.00`. Excel on an Estonian locale writes `25000,00` — and since
-   the delimiter is also a comma, every row splits into the wrong field count and
-   fails to match. Open it in Notepad and confirm you see periods. Write it in a
-   plain text editor, not Excel.
-2. **Account name.** Compared on the part before the first `!`, so both
-   `PA-APEX-240737-09` and the `PA-APEX-240737-09!Apex!Apex` form NT8 shows in
-   the Account dropdown will match. Everything after the `!` is ignored. If it
-   still fails to match, the registration line prints the exact string NT8
-   handed the router — copy that.
-3. **Write it with the strategies disabled.** The router rewrites the whole file
-   on every new equity high, so a hand-edit made while it is running is lost.
-4. **It is read once, at `State.Realtime`.** Write the file first, then enable
-   the strategies.
+Parsing is deliberately strict and fail-closed:
 
-UTF-8 with or without BOM is fine. Comma delimiter is what the parser expects.
-Only the `peak` column is read back — `start_balance` and `drawdown` come from
-each chart's properties and are in the file for your eyes.
+- The header must be exactly
+  `account,start_balance,drawdown,peak,updated_utc`. A UTF-8 BOM is accepted.
+- Every data row must contain exactly five comma-separated fields. Blank lines,
+  quoted commas and extra columns are not accepted.
+- `start_balance`, `drawdown` and `peak` must use invariant-culture periods,
+  be finite, and be positive. Peak must be at least start balance.
+- `updated_utc` must be exactly `yyyy-MM-ddTHH:mm:ssZ`.
+- Normalized account names must be unique. Normalization trims the name and
+  ignores everything from the first `!` onward.
+- The seed row's start balance and drawdown must exactly equal that seat's
+  configured values. They are validated, not merely informational.
 
-After seeding, the file maintains itself: the router rewrites it on every new
-equity high. Re-seed by hand only after an NT8 outage (below) or an account reset.
+One malformed or duplicate row makes persistence unhealthy for the whole book
+and registration fails. A missing file is not a parse error, but it leaves every
+seat unseeded, so Routed cannot reach quorum. The file is read once when the
+book first registers. After correcting or replacing it, perform a full NT8
+process restart before retrying.
 
-## Checks before switching to Live
+Do not edit the file in Excel on a comma-decimal locale. Use a plain-text editor,
+keep periods as decimal separators, disable every strategy first, and retain a
+separate operator backup.
 
-1. **Confirm all six seats seeded.** Every strategy should print `peak seeded
-   at …` on startup. Any `⛔ PEAK NOT SEEDED` means that seat will never trade.
-2. **`UnroutedLogOnly` for a full session, windows unchanged.** Keep each chart's existing
-   per-window split — see the exposure trap above. Confirm each seat's computed
-   floor equals the broker's threshold. If they disagree, the peak or the
-   starting balance is wrong.
-3. **Restart NT8 mid-session.** Headroom must come back identical. If it jumps,
-   persistence is broken.
-4. **Six Sim101 charts on book `SIM`, all 23 windows, `Routed`, R=1.** Setting
-   the Account to Sim101 is the only way to run without real orders, and this is
-   the first place the all-window config is safe. Exactly one seat should submit
-   per signal, and `routing_SIM_*.csv` should show one winner per decision with
-   no seat starved.
-5. **Cut the whole book over at once** — all 23 windows and `Routed` in the same
-   edit, on all six charts. A half-routed book is neither architecture and
-   cannot be attributed, and an all-window chart left in an unrouted mode is a
-   full extra copy of every signal.
+### Atomic merged persistence and backup
 
-## Output
+The router loads all durable rows into a book-level map independent of the
+currently registered seats. On a new high for a seeded seat, it updates that one
+record and writes the **complete merged map**, so stopping a strategy does not
+delete its seed.
 
-`Documents\NinjaTrader 8\PropRouter\`
+Account-item callback values feed a monotonic `ObservePeak` path, preserving a
+transient high even if current equity has already moved lower. Current headroom
+is published separately from serialized `Account.Get` snapshots, so a delayed
+callback cannot overwrite current equity while its high is still retained.
 
-- `peaks_<book>.csv` — high-water marks, rewritten on every new high. Only
-  seeded seats are written back, so a bootstrapped peak can never launder itself
-  into a seeded one across a restart.
-- `routing_<book>_<yyyyMMdd>.csv` — one row per seat per decision, with equity,
-  peak, floor, headroom, frozen flag, seeded flag and trades taken.
+Writes go to a uniquely named temporary file with write-through enabled, then
+replace the primary atomically. The previous primary is retained as:
 
-The routing log is what lets you replay live decisions through
-`signal_router.py`'s allocator and confirm the two agree. Keep it permanently.
+```text
+peaks_<book>.csv.bak
+```
 
-## Known limitations
+On first creation, the router also creates a `.bak` copy. The backup is not
+loaded automatically; recovery is an operator action performed with all
+strategies disabled, followed by a full NT8 restart.
 
-- **NT8 downtime loses peaks.** The peak only ratchets while the platform is
-  running and in Realtime. If it is offline while an account makes a new intraday
-  high, the stored peak is stale — which understates the floor and overstates
-  headroom. Re-seed from the broker threshold after any outage.
-- **`UnroutedLogOnly` does not increment `trades_taken`**, so its tie-breaks fall
-  through to instance id. `Routed` counts properly.
-- **Mixed drawdown sizes.** Raw dollar headroom is the correct survival measure
-  across tiers, but the 25K seats have half the drawdown of the 50K seats and
-  reach their floor twice as fast in a bad run.
-- **Frozen seats are payout-capable assets.** `-09` and `-10` have already
-  frozen — their floors are locked at 25,100 and will never rise again, which is
-  why their headroom exceeds their $1,500 drawdown. `max_headroom` therefore
-  ranks them first and will route to them most often. `signal_router.py` has a
-  `protect_frozen` policy that deliberately does the opposite, on the reasoning
-  that a frozen seat is an asset to shelter rather than a workhorse. This is a
-  live policy question, not a bug.
+Any durable peak write failure latches persistence unhealthy and makes the
+Routed book refuse new allocations. It does not flatten existing positions or
+cancel existing broker orders. Verify both row count and timestamp after every
+fault test. The public `OverridePeak` method also requires the current lease,
+can only raise an existing trusted peak, and persists atomically. There is no
+operator-facing UI for it; a reset or other re-seeding is an offline
+file-and-restart procedure.
+
+## Startup and restart interlock
+
+Before registering—or before entering even in an unrouted mode—the strategy
+requires:
+
+- an assigned account and non-empty Book ID;
+- valid ExpectedSeats, `R`, Instance ID, start balance, drawdown and offset;
+- exactly one contract;
+- a flat account position for the instrument;
+- no active entry, stop, target, flatten or emergency order from any instance of
+  this strategy family on the account/instrument.
+
+If preflight fails, the strategy sets a startup interlock and permits no new
+entries in any mode until it is disabled, corrected and re-enabled.
+
+Operationally, use a stricter restart rule: **all six accounts must be flat and
+have no working orders of any kind for the instrument**. Realtime startup clears
+the strategy's local entry, stop, risk and target state. It cannot adopt or
+safely reconstruct an open position or an existing order. Test restarts only
+when flat/no-orders; never use a mid-position restart as a persistence test.
+
+Order errors or rejections disarm new entries and NinjaTrader's
+`StopCancelClose` behavior is configured as the platform fail-safe. Router
+publications immediately mark that seat unhealthy, so the full-book quorum also
+refuses new Routed allocations. That still requires Playback tests for the
+actual connection and order types.
+
+## Output and audit limits
+
+Files are under:
+
+```text
+Documents\NinjaTrader 8\PropRouter\
+```
+
+- `peaks_<book>.csv` — strict durable high-water marks.
+- `peaks_<book>.csv.bak` — previous primary, for manual recovery.
+- `routing_<book>_<yyyyMMdd>.csv` — Routed decisions only, one row per
+  registered seat when the first claimant creates a decision.
+
+The routing CSV is useful for diagnosis and approximate comparison with
+`signal_router.py`, but it is not a complete exact-replay ledger. It omits
+connection flags, equity/status timestamps, required-headroom input, explicit
+eligibility reasons and claimant acceptance. The logged `trades` count is an
+allocation count, not a fill count, and winners are incremented before the row is
+written. Routing-log I/O remains best-effort and does not itself fail the book
+closed.
+
+`UnroutedLogOnly` writes previews to the Output window only. Preserve the
+Output text separately when testing that mode.
+
+## Known unresolved limitations
+
+- **Zero-band stop-limit non-fill.** After an entry fill, the protective exit is
+  a stop-limit whose stop and limit are both the candle low. A gap through that
+  price can leave the long position open and unprotected. The headroom filter
+  covers only nominal candle risk; it does not cover commissions, slippage or a
+  non-filling stop-limit. A null API return triggers an emergency market exit,
+  but there is no independent accepted/working acknowledgement timeout. This is
+  the primary live-release blocker.
+- **Bar-close take-profit semantics.** The R:R target is detected only from a
+  completed bar close, then a new limit is submitted at close plus offset. It can
+  miss intrabar target touches and the limit can remain unfilled.
+- **Entry repricing is deliberately disabled.** The first working entry keeps
+  its accepted stop/R:R. This removes a fill/change race but changes signal
+  execution relative to the original strategy and has not been requalified
+  against the study exports.
+- **No open-position/order adoption.** Startup deliberately refuses an existing
+  account position or this instance's non-terminal orders. It cannot recover
+  their original stop/R:R state.
+- **No complete two-phase claim/accept protocol.** A selected caller that reaches
+  `TryClaim` is atomically marked `Pending` before the grant returns, closing the
+  local grant-to-submit quota gap. But an allocated winner that never calls is
+  not proactively reserved, and failed/rejected submissions are not reassigned
+  to another seat. There is no broker-acceptance token or acknowledgement timeout.
+- **A fail-closed decision stays closed for that bar timestamp.** If the first
+  claim occurs while a seat is stale or otherwise not ready, later heartbeats do
+  not recompute that cached decision. A later signal timestamp can recover.
+- **Decision identity is only `Time[0].Ticks`.** Repeated local timestamps around
+  daylight-saving changes, duplicate/replay bars, or a claimant delayed beyond
+  the 128-decision cache need explicit signal IDs/tombstones before live use.
+- **`trades_taken` resets on process restart.** It counts allocations, not
+  accepted orders or fills, and is only a tie-break after headroom.
+- **Downtime can miss a peak.** NT8 can ratchet NetLiquidation only while it is
+  running and receiving updates. Reconcile and re-seed from the broker after any
+  outage in which a higher governing peak may have occurred.
+- **Durability is synchronous.** Every observed new seeded high atomically writes
+  the merged peak file while holding the router lock. This favors high-water-mark
+  safety over latency, but disk stalls can delay strategy callbacks; stress-test
+  the actual storage and monitor write latency before any release.
+- **EOD modelling depends on external rules.** The conservative argument above
+  depends on broker definitions and the unverified freeze behavior.
+- **Freshness depends on market data.** A paused/quiet Playback stream can make a
+  seat older than 20 seconds and stop the whole book. This is safe failure, but
+  it must be operationally understood.
+- **The 23:57 cutoff needs a matching bar.** No bar timestamped 23:57–23:59 means
+  the explicit cutoff branch is not executed before midnight.
+- **No Strategy Analyzer qualification.** Entry logic and router registration
+  run only in Realtime; use Playback for end-to-end tests.
+- **No independent hard risk governor.** The router vetoes new entries; it does
+  not flatten on a floor breach, cap aggregate open loss/positions, enforce an
+  acknowledgement timeout, or provide an operator kill switch.
+
+## Playback release-gate checklist
+
+Use a dedicated simulation Book ID and six distinct simulation accounts. Run
+each configuration-fault test with a fresh Book ID or after a full NT8 restart,
+because the first registration latches the in-memory manifest and peak-file
+health for that process.
+
+A “no order” observation is not enough. The Output reason and any Routed CSV
+detail must show the expected fail-closed cause.
+
+### Build and deterministic setup
+
+- [ ] Copy both files, compile all NinjaScript, and obtain zero compile errors or
+  warnings relevant to these classes.
+- [ ] Create six distinct simulation accounts and map Instance IDs 1–6 once.
+- [ ] Set one NT8 global time zone; record the MT5-to-NT8 hour conversion,
+  including daylight-saving cases.
+- [ ] Use identical instrument, BarsPeriod, Trading Hours, quantity, exit offset,
+  stop-cover flag and 24 R:R values.
+- [ ] Create a strict five-column Playback peak file with six unique simulation
+  account rows; verify start/DD equality and exact UTC timestamps.
+- [ ] Start with all six accounts flat and with no working orders.
+
+### Router and persistence faults
+
+- [ ] **Quorum:** enable only five seats, advance Playback to a valid signal, and
+  confirm zero routed entries with `registered seats=5, expected exactly 6`.
+  Enable seat 6 and confirm that original signal remains denied but a new signal
+  timestamp can route once the book is ready.
+- [ ] **Identity/lease:** try a duplicate Instance ID and a duplicate normalized
+  account. Confirm registration is refused and the original owner remains intact.
+- [ ] **Manifest:** change one seat's R:R, ExitOffset, BarsPeriod, Trading Hours,
+  routing mode, frozen offset, equity source, `R`, ExpectedSeats or stop-cover
+  flag. Confirm registration/claim fails closed with a manifest or
+  decision-input mismatch.
+- [ ] **Quantity:** set quantity to two. Confirm the startup interlock blocks the
+  strategy in every routing mode.
+- [ ] **Seed schema:** separately test a bad header, comma decimal, extra field,
+  blank row, invalid timestamp, duplicate normalized account, peak below start,
+  and configured start/DD mismatch. Each must prevent Routed allocation.
+- [ ] **Persistence:** force a new simulated equity high. Confirm the primary and
+  `.bak` exist, all six rows remain, the intended peak changes, and a flat
+  restart restores the same floor/headroom.
+- [ ] **Persistence failure:** make the state directory unwritable in an isolated
+  test, trigger a new high, and confirm subsequent Routed claims fail closed.
+  Restore permissions and the primary from a verified backup before restarting.
+- [ ] **Freshness/disconnect:** pause market data for more than 20 seconds or
+  disconnect one simulation account. Confirm all new Routed allocations stop;
+  resume/reconnect and confirm all six must become fresh before routing resumes.
+
+### Signal and order lifecycle
+
+- [ ] **Normal allocation:** with six ready/free seats and no pending order,
+  confirm one and only one one-contract entry is submitted for `R=1`, to the
+  highest-headroom eligible seat. Do not require round-robin fairness.
+- [ ] **Pending reservation:** leave one entry working and generate another
+  signal. Confirm it consumes the `R=1` pending quota and no second entry is
+  allocated.
+- [ ] **Immutable working entry:** produce later red candles while that entry is
+  working. Confirm its broker price, candle stop and R:R are not changed, then
+  quantify the outcome difference versus the original repricing strategy.
+- [ ] **Overlap:** fill a seat, keep it in position, then generate a new signal.
+  Confirm that seat is excluded and another free seat may receive the new copy.
+- [ ] **Headroom filter:** with stop coverage enabled, test one seat below and one
+  above nominal candle risk. Confirm only the latter is eligible; then repeat
+  with coverage disabled and document the difference.
+- [ ] **Claimant loss:** prevent or reject the selected winner's submission.
+  Confirm no automatic second-seat reroute occurs. Treat this as an unresolved
+  behavior, not a passing redundancy test.
+- [ ] **Order rejection:** induce an entry/exit rejection in the simulator.
+  Confirm new entries disarm and `StopCancelClose` behavior is visible.
+- [ ] **Stop gap:** gap Playback through the equal stop/limit price. Confirm and
+  document whether the stop remains unfilled. Live release remains blocked until
+  this failure mode has a tested mitigation.
+- [ ] **Take profit:** test an intrabar target touch with close below target, then
+  a close above target. Confirm only the latter submits the close-plus-offset
+  limit and record whether it fills.
+- [ ] **End of day:** verify the real bar series emits a pre-midnight bar at or
+  after 23:57, requests flatten/cancel, and allows no later same-date entry.
+- [ ] **Restart:** first restart flat/no-orders and confirm peaks survive. Then,
+  on simulation only, attempt startup with a position and with a non-terminal
+  strategy order; confirm the startup interlock refuses adoption.
+
+### Modes and evidence
+
+- [ ] In `UnroutedLogOnly`, confirm every local signal still submits, previews
+  appear in Output, and no routing CSV is created.
+- [ ] In `Routed`, confirm the first claim creates one decision block in the
+  routing CSV and later claimants reuse it.
+- [ ] Archive strategy settings, global time zone, Trading Hours template, seed
+  primary/backup, Output, routing CSVs and Playback data for the test run.
+- [ ] Review every known limitation above and record a fix, accepted control, or
+  explicit release blocker. At present the stop-limit non-fill and missing
+  claimant acceptance/reroute keep this README at simulation/playback-only.
+
+## Future off-hours cutover procedure
+
+This is a procedure for a future release candidate, not approval to deploy the
+current prototype.
+
+1. Obtain a written release decision tied to an archived passing Playback run
+   and a specific code revision.
+2. Choose a closed-market maintenance window. Verify all six accounts are flat
+   and have no working orders. Disable every related strategy.
+3. Back up the current NinjaScript files, strategy templates, peak primary and
+   peak `.bak`. Reconcile every live peak/floor against the broker.
+4. Install both reviewed files and compile with zero errors. Set and record the
+   NT8 global time zone before opening/enabling the charts.
+5. Use a new, live-only Book ID for the release. Create its exact five-column
+   seed file while all strategies are disabled.
+6. Configure the **final** settings on all six disabled instances: unique IDs
+   1–6, correct accounts/start/DD, `ExpectedSeats=6`, `R=1`, one contract,
+   identical manifest fields, the final 01–23 R:R map, and `Routed`.
+   Never stage all-window live charts in an unrouted mode.
+7. Fully restart NT8 so the new Book ID and seed are loaded into clean in-memory
+   state. Reconfirm flat/no-orders after reconnection.
+8. While the market is still closed, enable the six Routed instances one at a
+   time. Quorum keeps new routing disarmed until all six are registered, seeded,
+   connected and fresh. Confirm every registration/seed message; any mismatch or
+   persistence error aborts the cutover.
+9. If any check fails, disable the book while it is still flat, correct the
+   offline configuration/file, and restart the whole NT8 process before retrying.
+10. Supervise the first session and retain Output/routing/state files. On any
+    unexpected order, stale seat, rejection, persistence fault or broker-state
+    mismatch, stop new entries and manage existing broker exposure according to
+    the approved incident procedure; router fail-closed behavior does not itself
+    flatten that exposure.
+
+Never hand-edit a loaded peak file, change the global time zone, or change a
+manifest field during an active session.
