@@ -9,21 +9,27 @@
 > test below passes and the unresolved exit and allocation risks are either fixed
 > or explicitly accepted.
 
+Start with the step-by-step [first-start operator manual](FIRST_START.md),
+especially before creating or editing a peak file.
+
 ## Files and scope
 
 | File | NinjaTrader location |
 |---|---|
 | `PropRouter.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
 | `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits_Routed.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` |
+| `FIRST_START.md` | operator checklist; read before creating the book or peak file |
 | `tests\*` | local regression harness only; do not copy into NinjaTrader |
 
 The routed strategy is derived from
 `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits(EXAMPLE).cs`,
-but it is **not byte-identical** to that file. The red-candle signal, stop-limit
-entry, window R:R calculation and general exit shape remain recognizable.
-Routing, startup validation, state publication, order-state handling, error
-handling and the end-of-day cutoff have all been changed. Treat this as a new
-strategy variant and regression-test the complete order lifecycle.
+but it is **not byte-identical** to that file. Its core trading rules are
+intentionally preserved: latest-red-candle stop-limit entry, candle-low
+stop-limit loss exit, window R:R, and bar-close-triggered take-profit limit.
+Routing, startup validation, state publication, broker-acknowledged entry
+replacement, error handling and the end-of-day interlocks add substantial
+order-management plumbing around those rules. Regression-test the complete
+order lifecycle before relying on the variant.
 
 The self-contained router regression suite compiles the real `PropRouter.cs`
 against a minimal `Globals.UserDataDir` stub:
@@ -211,18 +217,29 @@ requests flatten/cancel and blocks later entries that date. A series with no
 exit is a separate backstop. Test the actual BarsPeriod, Trading Hours template
 and global time zone in Playback.
 
-The R:R take-profit is also bar-close-driven. It is **not** a resting target
-order placed at entry. Only after a completed bar closes at or above the target
-does the strategy submit a sell limit at `Close + ExitOffset`. Intrabar touches
-that close below the target do not trigger it, and the new limit is not
-guaranteed to fill.
+The following core order semantics are intentional and match the original
+strategy design:
 
-Once an entry order is working, its accepted candle stop and R:R are immutable.
-Later red candles do not reprice it; the order remains until it fills, reaches a
-terminal state, or is cancelled outside its window/EOD. This conservative change
-avoids a managed-order race in which an old fill could inherit a new candle's
-risk parameters, but it diverges from the original repricing behavior and needs
-fresh strategy-level outcome comparison.
+1. A valid red candle submits a buy stop-limit at that candle's high. Its low and
+   the active hour's R:R stay attached to that order setup.
+2. If another valid red candle closes before entry, the strategy requests
+   cancellation of the old order. It submits the newest red-candle order only
+   after the broker reports the old order `Cancelled`.
+3. If the old order fills before cancellation is confirmed, the queued
+   replacement is discarded. That fill keeps the old candle's stop and R:R; it
+   can never inherit the newer candle's risk values.
+4. After entry, the loss exit remains the original sell stop-limit with equal
+   stop and limit at the signal candle's low.
+5. The take-profit remains bar-close-driven. It is **not** a resting target
+   placed at entry. Only after a completed bar closes at or above the target does
+   the strategy submit a sell limit at `Close + ExitOffset`. An intrabar target
+   touch followed by a close below target does nothing.
+
+Cancel acknowledgement creates a real broker-time gap. If price reaches or
+passes the queued replacement stop before the old cancellation is confirmed,
+the replacement is skipped rather than submitting an already-triggered stop.
+This preserves order/risk ownership; test both the cancel-first and fill-first
+races in Playback.
 
 ## Routing modes — none is a dry run
 
@@ -443,13 +460,15 @@ Output text separately when testing that mode.
   non-filling stop-limit. A null API return triggers an emergency market exit,
   but there is no independent accepted/working acknowledgement timeout. This is
   the primary live-release blocker.
-- **Bar-close take-profit semantics.** The R:R target is detected only from a
-  completed bar close, then a new limit is submitted at close plus offset. It can
-  miss intrabar target touches and the limit can remain unfilled.
-- **Entry repricing is deliberately disabled.** The first working entry keeps
-  its accepted stop/R:R. This removes a fill/change race but changes signal
-  execution relative to the original strategy and has not been requalified
-  against the study exports.
+- **Take-profit limit non-fill.** Bar-close target evaluation is intentional and
+  unchanged from the original rules, but the limit submitted at close plus
+  offset is not guaranteed to fill. There is no independent accepted/working
+  acknowledgement timeout.
+- **Cancel/replace depends on broker acknowledgement.** A newer valid red candle
+  cancels the prior working entry and replaces it only after confirmed
+  `Cancelled`. If the old order fills first, the replacement is discarded. If
+  price is already at/above the new stop after cancellation, the replacement is
+  skipped. Both races require provider-specific Playback testing.
 - **No open-position/order adoption.** Startup deliberately refuses an existing
   account position or this instance's non-terminal orders. It cannot recover
   their original stop/R:R state.
@@ -544,9 +563,13 @@ detail must show the expected fail-closed cause.
 - [ ] **Pending reservation:** leave one entry working and generate another
   signal. Confirm it consumes the `R=1` pending quota and no second entry is
   allocated.
-- [ ] **Immutable working entry:** produce later red candles while that entry is
-  working. Confirm its broker price, candle stop and R:R are not changed, then
-  quantify the outcome difference versus the original repricing strategy.
+- [ ] **Cancel-first replacement:** leave red-candle A's entry working, then close
+  a valid red candle B. Confirm A receives a cancel request, no B order is sent
+  before A is terminal, and exactly one B buy stop-limit appears after A reports
+  `Cancelled`, using B's high, low and R:R.
+- [ ] **Fill-first replacement race:** fill A while its cancellation is pending.
+  Confirm B is discarded and A's protective stop and target calculation use A's
+  low and R:R—not B's.
 - [ ] **Overlap:** fill a seat, keep it in position, then generate a new signal.
   Confirm that seat is excluded and another free seat may receive the new copy.
 - [ ] **Headroom filter:** with stop coverage enabled, test one seat below and one
