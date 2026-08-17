@@ -24,12 +24,19 @@ especially before creating or editing a peak file.
 The routed strategy is derived from
 `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits(EXAMPLE).cs`,
 but it is **not byte-identical** to that file. Its core trading rules are
-intentionally preserved: latest-red-candle stop-limit entry, candle-low
-stop-limit loss exit, window R:R, and bar-close-triggered take-profit limit.
-Routing, startup validation, state publication, broker-acknowledged entry
-replacement, error handling and the end-of-day interlocks add substantial
-order-management plumbing around those rules. Regression-test the complete
-order lifecycle before relying on the variant.
+intentionally preserved: latest-red-candle stop-limit entry re-priced **in place**,
+candle-low zero-band stop-limit loss exit, window R:R, and bar-close-triggered
+take-profit limit. `RealtimeErrorHandling` remains `IgnoreAllErrors` and the
+strategy-level end-of-day cutoff has been removed in favour of NinjaTrader's
+built-in session close.
+
+Fill behaviour must match what `signal_router.py` measured, so nothing may
+suppress an entry the original would have taken. The only additions that can
+withhold an entry are the router claim itself, the one-time startup preflight,
+and the full-book quorum — all of which exist to keep live allocation faithful to
+the study rather than to add a risk policy. Routing, state publication and
+logging add plumbing around the rules but not new entry conditions.
+Regression-test the complete order lifecycle before relying on the variant.
 
 The self-contained router regression suite compiles the real `PropRouter.cs`
 against a minimal `Globals.UserDataDir` stub:
@@ -421,11 +428,14 @@ the strategy's local entry, stop, risk and target state. It cannot adopt or
 safely reconstruct an open position or an existing order. Test restarts only
 when flat/no-orders; never use a mid-position restart as a persistence test.
 
-Order errors or rejections disarm new entries and NinjaTrader's
-`StopCancelClose` behavior is configured as the platform fail-safe. Router
-publications immediately mark that seat unhealthy, so the full-book quorum also
-refuses new Routed allocations. That still requires Playback tests for the
-actual connection and order types.
+Order errors and rejections are **logged only**. `RealtimeErrorHandling` is
+`IgnoreAllErrors`, matching the original strategy: `StopCancelClose` would
+flatten a live position at market on any transient rejection, and the zero-band
+protective stop-limit is exactly the order most likely to trigger that. No
+in-session condition disarms a running seat — the startup interlock is a
+one-time preflight only. This trades a platform fail-safe for fidelity to the
+measured system, which makes the order-rejection Playback test more important,
+not less.
 
 ## Output and audit limits
 
@@ -497,13 +507,19 @@ Output text separately when testing that mode.
 - **Freshness depends on market data.** A paused/quiet Playback stream can make a
   seat older than 20 seconds and stop the whole book. This is safe failure, but
   it must be operationally understood.
-- **The 23:57 cutoff needs a matching bar.** No bar timestamped 23:57–23:59 means
-  the explicit cutoff branch is not executed before midnight.
 - **No Strategy Analyzer qualification.** Entry logic and router registration
   run only in Realtime; use Playback for end-to-end tests.
 - **No independent hard risk governor.** The router vetoes new entries; it does
   not flatten on a floor breach, cap aggregate open loss/positions, enforce an
   acknowledgement timeout, or provide an operator kill switch.
+- **Errors are not fail-safe, by design.** `IgnoreAllErrors` and the absence of
+  in-session disarming are deliberate fidelity choices. A rejected protective
+  stop leaves an unprotected position and the strategy keeps running; only the
+  emergency market exit and the built-in session close will act.
+- **Entry re-pricing carries the original's race.** A new red candle re-prices
+  the working order in place. If the old price fills before the modification
+  lands, that fill is protected with the newer candle's stop. This is the
+  original behaviour, retained deliberately so fills match the measured system.
 
 ## Playback release-gate checklist
 
@@ -579,15 +595,20 @@ detail must show the expected fail-closed cause.
   Confirm no automatic second-seat reroute occurs. Treat this as an unresolved
   behavior, not a passing redundancy test.
 - [ ] **Order rejection:** induce an entry/exit rejection in the simulator.
-  Confirm new entries disarm and `StopCancelClose` behavior is visible.
+  Confirm the strategy logs the error, keeps running, and still takes new
+  entries. Confirm no position is auto-flattened.
+- [ ] **Re-pricing:** with an unfilled entry working, produce a later red candle.
+  Confirm the working order is modified in place with no cancel/resubmit gap, and
+  that re-pricing consumes no additional router claim.
 - [ ] **Stop gap:** gap Playback through the equal stop/limit price. Confirm and
   document whether the stop remains unfilled. Live release remains blocked until
   this failure mode has a tested mitigation.
 - [ ] **Take profit:** test an intrabar target touch with close below target, then
   a close above target. Confirm only the latter submits the close-plus-offset
   limit and record whether it fills.
-- [ ] **End of day:** verify the real bar series emits a pre-midnight bar at or
-  after 23:57, requests flatten/cancel, and allows no later same-date entry.
+- [ ] **End of day:** verify NinjaTrader's built-in session-close exit flattens
+  and cancels at the Trading Hours template's session end. There is no
+  strategy-level cutoff to test.
 - [ ] **Restart:** first restart flat/no-orders and confirm peaks survive. Then,
   on simulation only, attempt startup with a position and with a non-terminal
   strategy order; confirm the startup interlock refuses adoption.

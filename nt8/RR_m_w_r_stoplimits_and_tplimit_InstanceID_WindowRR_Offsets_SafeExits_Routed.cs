@@ -16,10 +16,19 @@ using System.Text;
 // -----------------------------------------------------------------------------
 // Routed variant of RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExits.
 //
-// This began as the original strategy plus a routing gate. The live-facing variant
-// now also contains startup, quantity, order-error, heartbeat and cutoff interlocks.
-// Core order semantics are intentionally preserved: latest-red-candle stop-limit
-// entry, candle-low stop-limit protection and bar-close take-profit submission.
+// The original strategy plus a routing gate, and deliberately little else. Fill
+// behaviour must match what signal_router.py measured, so nothing may suppress an
+// entry the original would have taken:
+//
+//   * RealtimeErrorHandling stays IgnoreAllErrors, as in the original.
+//   * A new red candle re-prices the working entry IN PLACE (managed API), so an
+//     entry order is continuously live - no cancel/resubmit gap.
+//   * The only entry gates are the original's own (window, R:R, gap) plus the
+//     router claim, a one-time startup preflight, and the book quorum.
+//   * End-of-session flattening is NinjaTrader's built-in handling only.
+//
+// Order semantics preserved exactly: latest-red-candle stop-limit entry, zero-band
+// candle-low stop-limit protection, bar-close take-profit limit.
 // The zero-band protective stop-limit remains a live-release blocker in README.md.
 //
 // Requires: bin\Custom\AddOns\PropRouter.cs
@@ -55,10 +64,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        private readonly object entryReplacementSync = new object();
-        private bool entryReplacementPending;
-        private Order entryReplacementSource;
-        private EntrySetup entryReplacementSetup;
         private readonly object entrySetupsSync = new object();
         private readonly Dictionary<Order, EntrySetup> entrySetupsByOrder =
             new Dictionary<Order, EntrySetup>();
@@ -68,13 +73,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         private readonly object exitOrdersSync = new object();
         private readonly List<Order> stopOrders = new List<Order>();
         private readonly List<Order> takeProfitOrders = new List<Order>();
-        private DateTime lastFlattenDate = Core.Globals.MinDate;
         private bool lastWindowState = false;
 
         // Router plumbing
         private volatile bool routerRegistered;
         private Guid routerLease = Guid.Empty;
-        private volatile bool startupBlocked;
+        // Set ONLY by the one-time preflight in RegisterSeat. No in-session condition
+        // sets this, so a transient order error can never disarm a running seat.
+        private volatile bool startupInterlocked;
         private DateTime lastRouterHeartbeatUtc = Core.Globals.MinDate;
         private string lastRouterFailure = string.Empty;
         private DateTime lastRouterFailureUtc = Core.Globals.MinDate;
@@ -87,7 +93,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string EntrySignalName    => $"Long1_{InstanceId}";
         private string StopLossSignalName => $"StopLimit_{InstanceId}";
         private string TakeProfitName     => $"RR_Limit_{InstanceId}";
-        private string FlattenName        => $"DailyFlatten_{InstanceId}";
         private string EmergencyExitName  => $"InvalidStopExit_{InstanceId}";
         private int EntryQuantity         => UseCustomQuantity ? CustomQuantity : DefaultQuantity;
 
@@ -434,7 +439,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // There is no complete custom rejection state machine here. NinjaTrader's
                 // fail-safe behavior is therefore mandatory: cancel working orders, close the
                 // strategy position and stop rather than continue after a rejected live order.
-                RealtimeErrorHandling = RealtimeErrorHandling.StopCancelClose;
+                // Matches the original strategy. StopCancelClose would flatten a live position
+                // at market on any transient rejection - a zero-band protective stop-limit is
+                // exactly the order most likely to trigger that.
+                RealtimeErrorHandling = RealtimeErrorHandling.IgnoreAllErrors;
                 InstanceId = 1;
                 UseCustomQuantity = false;
                 CustomQuantity = 1;
@@ -486,7 +494,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.Realtime)
             {
                 longOrder = null;
-                ClearEntryReplacement();
                 ClearEntrySetupBindings();
                 pendingStopPrice = 0;
                 entryPrice = 0;
@@ -496,7 +503,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ResetExitTracking();
                 routerRegistered = false;
                 routerLease = Guid.Empty;
-                startupBlocked = false;
+                startupInterlocked = false;
                 lastRouterHeartbeatUtc = Core.Globals.MinDate;
                 lastRouterFailure = string.Empty;
                 lastRouterFailureUtc = Core.Globals.MinDate;
@@ -549,7 +556,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             string preflightReason;
             if (!ValidateStartup(out preflightReason))
             {
-                startupBlocked = true;
+                startupInterlocked = true;
                 Print($"[{EntrySignalName}] ⛔ STARTUP INTERLOCK — {preflightReason}");
                 Print($"[{EntrySignalName}] ⛔ No new entries are permitted in ANY routing mode. " +
                       "Resolve the account/order/configuration state, then disable and re-enable the strategy.");
@@ -802,7 +809,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool IsRouterConnectedAndHealthy()
         {
-            return !startupBlocked && IsAccountConnected();
+            return !startupInterlocked && IsAccountConnected();
         }
 
         private void PublishEquity()
@@ -890,12 +897,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        private bool HasSeatReservation()
-        {
-            lock (routerStatusSync)
-                return routerSeatStatus != SeatStatus.Free;
-        }
-
         private void RefreshFlatRouterStatus()
         {
             lock (routerStatusSync)
@@ -932,7 +933,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         /// </summary>
         private bool MayEnter(double candidateRisk)
         {
-            if (startupBlocked)
+            if (startupInterlocked)
                 return false;
 
             if (RoutingMode == PropRouterMode.Unrouted)
@@ -1017,17 +1018,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                    state == OrderState.Unknown;
         }
 
-        private bool EntryOrdersMatch(Order first, Order second)
-        {
-            if (first == null || second == null)
-                return false;
-            if (ReferenceEquals(first, second))
-                return true;
-            return !string.IsNullOrWhiteSpace(first.OrderId)
-                && !string.IsNullOrWhiteSpace(second.OrderId)
-                && string.Equals(first.OrderId, second.OrderId, StringComparison.Ordinal);
-        }
-
         private void ClearEntrySetupBindings()
         {
             lock (entrySetupsSync)
@@ -1096,88 +1086,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        private void ClearEntryReplacement()
-        {
-            lock (entryReplacementSync)
-            {
-                entryReplacementPending = false;
-                entryReplacementSource = null;
-                entryReplacementSetup = null;
-            }
-        }
-
-        private void ClearEntryReplacementFor(Order order)
-        {
-            lock (entryReplacementSync)
-            {
-                if (!entryReplacementPending || !EntryOrdersMatch(entryReplacementSource, order))
-                    return;
-                entryReplacementPending = false;
-                entryReplacementSource = null;
-                entryReplacementSetup = null;
-            }
-        }
-
-        private void QueueEntryReplacement(Order source, EntrySetup setup)
-        {
-            if (source == null || setup == null)
-                return;
-
-            bool requestCancel;
-            lock (entryReplacementSync)
-            {
-                requestCancel = !entryReplacementPending
-                    || !EntryOrdersMatch(entryReplacementSource, source);
-                entryReplacementPending = true;
-                entryReplacementSource = source;
-                // While cancellation is pending, the newest valid red candle wins.
-                entryReplacementSetup = setup;
-            }
-
-            SetRouterStatus(SeatStatus.Pending);
-            Print($"[{setup.SignalTime}] [{EntrySignalName}] new red candle replaces working setup: " +
-                  $"request cancel of {source.OrderId} and queue BUY STOP-LIMIT @ {setup.EntryPrice} " +
-                  $"with stop {setup.StopPrice}");
-
-            if (!requestCancel || !IsActiveOrder(source)
-                || source.OrderState == OrderState.CancelPending
-                || source.OrderState == OrderState.CancelSubmitted)
-                return;
-
-            try
-            {
-                CancelOrder(source);
-            }
-            catch (Exception ex)
-            {
-                ClearEntryReplacementFor(source);
-                startupBlocked = true;
-                PublishStatus();
-                Print($"[{setup.SignalTime}] [{EntrySignalName}] ⛔ cancel-for-replacement threw " +
-                      $"{ex.GetType().Name}: {ex.Message}; old reservation remains Pending and new entries are disarmed");
-            }
-        }
-
-        private bool TryTakeEntryReplacement(Order cancelledOrder, out EntrySetup setup)
-        {
-            lock (entryReplacementSync)
-            {
-                if (!entryReplacementPending
-                    || !EntryOrdersMatch(entryReplacementSource, cancelledOrder)
-                    || entryReplacementSetup == null)
-                {
-                    setup = null;
-                    return false;
-                }
-
-                setup = entryReplacementSetup;
-                entryReplacementPending = false;
-                entryReplacementSource = null;
-                entryReplacementSetup = null;
-                return true;
-            }
-        }
-
         private void SubmitEntrySetup(EntrySetup setup, string context)
         {
             entryPrice = setup.EntryPrice;
@@ -1196,10 +1104,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     entryPrice, entryPrice, EntrySignalName);
                 if (submitted == null)
                 {
-                    startupBlocked = true;
                     PublishStatus();
-                    Print($"[{setup.SignalTime}] [{EntrySignalName}] ⛔ {context} entry API returned no Order object; " +
-                          "seat remains Pending and new entries are disarmed until broker state is reconciled");
+                    Print($"[{setup.SignalTime}] [{EntrySignalName}] ⛔ {context} entry API returned no Order object");
                 }
                 else
                 {
@@ -1212,60 +1118,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             catch (Exception ex)
             {
-                startupBlocked = true;
                 PublishStatus();
                 Print($"[{setup.SignalTime}] [{EntrySignalName}] ⛔ {context} entry submission threw " +
-                      $"{ex.GetType().Name}: {ex.Message}; seat remains Pending until broker state is reconciled");
+                      $"{ex.GetType().Name}: {ex.Message}");
             }
             finally
             {
                 EndEntrySetupSubmission(setup);
             }
-        }
-
-        private bool HandleCancelledEntryReplacement(Order cancelledOrder, DateTime callbackTime)
-        {
-            EntrySetup setup;
-            if (!TryTakeEntryReplacement(cancelledOrder, out setup))
-                return false;
-
-            longOrder = null;
-
-            bool ownPositionFlat = Position == null
-                || Position.MarketPosition == MarketPosition.Flat;
-            bool accountPositionFlat = PositionAccount == null
-                || PositionAccount.MarketPosition == MarketPosition.Flat;
-            bool stillEligibleLocally = State == State.Realtime
-                && !startupBlocked
-                && IsAccountConnected()
-                && ownPositionFlat
-                && accountPositionFlat
-                && !HasActiveExitOrders()
-                && ToTime(Time[0]) < 235700
-                && IsTradeWindow(Time[0])
-                && IsTradeWindow(setup.SignalTime);
-
-            if (!stillEligibleLocally)
-            {
-                SetRouterStatus(accountPositionFlat ? SeatStatus.Free : SeatStatus.InPosition);
-                Print($"[{callbackTime}] [{EntrySignalName}] old entry is cancelled, but queued replacement " +
-                      "is no longer locally eligible; no replacement submitted");
-                return true;
-            }
-
-            double ask = GetCurrentAsk();
-            if (ask >= setup.EntryPrice)
-            {
-                SetRouterStatus(SeatStatus.Free);
-                Print($"[{callbackTime}] [{EntrySignalName}] old entry is cancelled, but market is now at/above " +
-                      $"queued stop {setup.EntryPrice}; replacement skipped");
-                return true;
-            }
-
-            Print($"[{callbackTime}] [{EntrySignalName}] broker confirmed old entry Cancelled; " +
-                  $"submitting latest red-candle replacement from {setup.SignalTime}");
-            SubmitEntrySetup(setup, "cancel-confirmed replacement");
-            return true;
         }
 
         private void TrackOrder(List<Order> orders, Order order)
@@ -1357,26 +1217,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             PublishEquity();
             PublishStatus();
 
-            // === End of session FLATTEN LOGIC ===
-            // Once the cutoff is reached, remain disarmed through midnight. The old one-minute
-            // window allowed a fresh 23:58/23:59 entry and missed the action on coarser bars.
-            if (ToTime(Time[0]) >= 235700)
-			{
-                ClearEntryReplacement();
-				if (lastFlattenDate.Date != Time[0].Date)
-				{
-					lastFlattenDate = Time[0];
-					Print($"[{Time[0]}] [{EntrySignalName}] ❌ End-of-day cutoff reached → " +
-                          "flatten/cancel requested; new entries remain blocked through midnight");
-
-					if (Position.MarketPosition == MarketPosition.Long)
-						ExitLong(FlattenName, EntrySignalName);
-
-					if (IsActiveOrder(longOrder))
-						CancelOrder(longOrder);
-				}
-				return;
-			}
+            // End-of-session flattening is delegated entirely to NinjaTrader's built-in
+            // handling (IsExitOnSessionCloseStrategy / ExitOnSessionCloseSeconds). The
+            // strategy-level 23:57 cutoff has been removed.
 
             if (CurrentBar < BarsRequiredToTrade) return;
             if (State != State.Realtime) return;
@@ -1398,9 +1241,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (targetOrder == null)
                     {
                         ClearTakeProfitSubmitted();
-                        startupBlocked = true;
                         PublishStatus();
-                        Print($"[{Time[0]}] [{EntrySignalName}] ⛔ take-profit API returned no Order object; new entries disarmed");
+                        Print($"[{Time[0]}] [{EntrySignalName}] ⛔ take-profit API returned no Order object; will retry next bar");
                     }
                     else
                     {
@@ -1415,11 +1257,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
 
             // 🔹 TRADE WINDOW (ENTRY ONLY)
-            if (HasActiveExitOrders())
-            {
-                Print($"[{Time[0]}] [{EntrySignalName}] ⛔ flat but a prior exit order is still non-terminal → no new entry");
-                return;
-            }
             if (HasTrackedExitState())
                 ResetExitTracking();
 
@@ -1433,7 +1270,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (!inWindow)
             {
-                ClearEntryReplacement();
                 if (IsActiveOrder(longOrder))
                 {
                     Print($"[{Time[0]}] [{EntrySignalName}] ⏱ Outside window → cancelling pending order @ {longOrder.StopPrice}");
@@ -1472,22 +1308,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EntrySetup candidate = new EntrySetup(Time[0], candidateEntryPrice,
                     candidateStopPrice, candidateRisk, candidateRiskReward);
 
-                // Preserve the original latest-red-candle rule without allowing an old fill
-                // to inherit the new candle's risk. Keep A's accepted parameters untouched,
-                // request A's cancellation, and submit B only after broker-confirmed Cancelled.
-                // If A fills first, OnExecutionUpdate discards B and protects A with A's stop/R:R.
+                // Original behaviour: a new red candle re-prices the working entry IN PLACE via
+                // the managed API, so an entry order is continuously live. This seat is already
+                // carrying the signal, so re-pricing is a continuation, not a new copy, and does
+                // not consume a router slot.
                 if (IsActiveOrder(longOrder))
                 {
-                    QueueEntryReplacement(longOrder, candidate);
-                    return;
-                }
-
-                // A router/broker reservation without an identifiable working order is
-                // ambiguous. Do not create another order until authoritative reconciliation.
-                if (HasSeatReservation())
-                {
-                    Print($"[{Time[0]}] [{EntrySignalName}] ⛔ entry reservation exists without a " +
-                          "replaceable working order; no new submission");
+                    SubmitEntrySetup(candidate, "re-priced working entry");
                     return;
                 }
 
@@ -1505,10 +1332,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (execution != null && execution.Name == EntrySignalName && quantity > 0)
             {
-                // If the old working order fills before its cancellation is confirmed,
-                // abandon the queued newer candle. The accepted old stop/R:R fields have
-                // deliberately not been overwritten, so this fill keeps its own risk setup.
-                ClearEntryReplacement();
+                // The entry order is re-priced in place, so the setup bound to this order id
+                // is the one that actually filled. Falls back to the pending fields if the
+                // binding is missing.
                 EntrySetup fillSetup = ResolveExecutionSetup(execution, orderId);
                 double fillStopPrice = fillSetup == null ? pendingStopPrice : fillSetup.StopPrice;
                 double fillRiskReward = fillSetup == null ? pendingRiskReward : fillSetup.RiskReward;
@@ -1550,7 +1376,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                             limitPrice, fillStopPrice, StopLossSignalName, EntrySignalName);
                         if (protectiveOrder == null)
                         {
-                            startupBlocked = true;
                             PublishStatus();
                             Print($"[{time}] [{EntrySignalName}] ⛔ protective-stop API returned no Order object; " +
                                   "submitting emergency market exit");
@@ -1607,23 +1432,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (error != ErrorCode.NoError || orderState == OrderState.Rejected)
             {
-                startupBlocked = true;
+                // Logged only. RealtimeErrorHandling.IgnoreAllErrors matches the original
+                // strategy, and no in-session error disarms this seat.
                 Print($"[{time}] [{EntrySignalName}] ⛔ ORDER ERROR name={order.Name} state={orderState} " +
-                      $"error={error} broker='{nativeError}'. New entries are disarmed; " +
-                      "StopCancelClose will apply NinjaTrader's fail-safe handling.");
+                      $"error={error} broker='{nativeError}'");
             }
 
             // Only track orders that belong to this instance
             if (order.Name == EntrySignalName)
             {
                 BindEntryOrderSetup(order, null);
-                if (orderState == OrderState.Cancelled
-                    && HandleCancelledEntryReplacement(order, time))
-                    return;
-
-                if (orderState == OrderState.Filled || orderState == OrderState.Rejected)
-                    ClearEntryReplacementFor(order);
-
                 longOrder = order;
                 ApplyEntryOrderStatus(orderState);
             }
