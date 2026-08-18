@@ -72,7 +72,51 @@ The recovered study uses `frozen_offset = 100`. Compare the calculated floor
 with the broker's displayed liquidation threshold/cushion. A mismatch is a stop
 condition; do not “correct” it by guessing a different peak.
 
+## 3a. Generate the peak file from a broker statement (real accounts)
+
+For the six real Apex seats, do not hand-derive the peaks. Export the account
+statement CSV from the broker and run:
+
+```bash
+python make_peak_file.py Broker_statement.csv --book LIVE
+```
+
+The statement must contain the columns `Account`, `Status`, `Account Balance`,
+`Auto Liquidate Threshold Value`, `Auto Liquidate EOD Value` and
+`Auto Liquidate Peak Balance`.
+
+The script picks the correct broker floor per account automatically - the
+threshold column for intraday-trailing seats, the EOD column for end-of-day
+seats - and emits `peak = broker_floor + drawdown` so the router's own
+`min(peak - dd, start + 100)` lands exactly on the broker's published threshold.
+It then recomputes that floor for every row and refuses to write anything if a
+single row disagrees. It also prints the resulting headroom per seat and the
+max-headroom ranking, which is the order the router will prefer.
+
+`start_balance` and `drawdown` come from the `SEAT_CONFIG` table at the top of
+the script. **These must match each chart's Seat starting balance and Seat
+trailing drawdown exactly** - the router compares them with an exact equality
+test and refuses to register a seat on any mismatch. Edit that table, not the
+generated CSV, if a value is wrong.
+
+To confirm an existing file is still current after an NT8 outage, export a fresh
+statement and run:
+
+```bash
+python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
+```
+
+It exits `0` when the file matches and `1` when any seat is stale, so it can be
+wired into a pre-start check.
+
+The generated file is UTF-8 without BOM, LF endings, period decimals - the exact
+form the router's strict parser requires. Copy it into place with every strategy
+stopped; the router rewrites this file on every new equity high and will clobber
+an edit made while it is running.
+
 ## 3. Create the peak file manually
+
+Use this path for simulation books, or when no broker statement is available.
 
 With NinjaTrader fully closed, create this directory if it does not exist:
 

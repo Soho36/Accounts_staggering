@@ -19,6 +19,7 @@ especially before creating or editing a peak file.
 | `PropRouter.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
 | `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits_Routed.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` |
 | `FIRST_START.md` | operator checklist; read before creating the book or peak file |
+| `make_peak_file.py` | builds/verifies `peaks_<BOOK>.csv` from a broker statement; run locally, not in NinjaTrader |
 | `tests\*` | local regression harness only; do not copy into NinjaTrader |
 
 The routed strategy is derived from
