@@ -99,6 +99,16 @@ def disagreement(account, pairs, explain):
     return "\n".join(out)
 
 
+def nt8_state_dir():
+    """Best-effort location of the NinjaTrader 8 PropRouter directory."""
+    home = os.path.expanduser("~")
+    for parent in (os.path.join(home, "Documents", "NinjaTrader 8"),
+                   os.path.join(home, "OneDrive", "Documents", "NinjaTrader 8")):
+        if os.path.isdir(parent):
+            return os.path.join(parent, "PropRouter")
+    return None
+
+
 def dec(raw):
     """Parse a broker cell into a Decimal, or None when blank."""
     if raw is None:
@@ -353,6 +363,11 @@ def main(argv=None):
                     help="output path (default: peaks_<BOOK>.csv)")
     ap.add_argument("--check", metavar="PEAKFILE", default=None,
                     help="verify an existing peak file instead of writing one")
+    ap.add_argument("--install", action="store_true",
+                    help="write straight into the NinjaTrader PropRouter directory, "
+                         "naming the file from --book so the Book ID is never retyped")
+    ap.add_argument("--nt8-dir", default=None, dest="nt8_dir",
+                    help="override the NinjaTrader PropRouter directory used by --install")
     args = ap.parse_args(argv)
 
     try:
@@ -384,7 +399,26 @@ def main(argv=None):
               if ok else "Peak file is STALE - re-run without --check to rewrite.")
         return 0 if ok else 1
 
-    out = args.out or ("peaks_%s.csv" % args.book)
+    if args.install and args.out:
+        print("ERROR: use either --install or --out, not both", file=sys.stderr)
+        return 2
+
+    if args.install:
+        state_dir = args.nt8_dir or nt8_state_dir()
+        if not state_dir:
+            print("ERROR: could not locate the NinjaTrader 8 directory. Pass "
+                  "--nt8-dir with the PropRouter folder path.", file=sys.stderr)
+            return 2
+        try:
+            if not os.path.isdir(state_dir):
+                os.makedirs(state_dir)
+        except OSError as exc:
+            print("ERROR: cannot create %s: %s" % (state_dir, exc), file=sys.stderr)
+            return 2
+        out = os.path.join(state_dir, "peaks_%s.csv" % args.book)
+    else:
+        out = args.out or ("peaks_%s.csv" % args.book)
+
     stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     body = write_peak_file(seeds, out, stamp)
 
@@ -402,12 +436,27 @@ def main(argv=None):
           % FROZEN_OFFSET)
     print("")
     print("Next:")
-    print("  1. Stop every strategy in book '%s' before copying this into place. The"
-          % args.book)
-    print("     router rewrites the file on every new equity high and would clobber it.")
-    print("  2. Copy to:  Documents\\NinjaTrader 8\\PropRouter\\%s"
-          % os.path.basename(out))
-    print("  3. Start the strategies; each should print 'peak seeded at ...'.")
+    if args.install:
+        print("  1. The file is already in place. Every strategy in book %r must have"
+              % args.book)
+        print("     been stopped when this ran - the router rewrites the file on every")
+        print("     new equity high and would have clobbered it.")
+        print("  2. Fully restart NinjaTrader. Disabling and re-enabling a strategy does")
+        print("     NOT reload the peak file; the load is latched per book per process.")
+        print("  3. Start the strategies; each should print 'peak seeded at ...'.")
+    else:
+        print("  1. Stop every strategy in book %r before copying this into place. The"
+              % args.book)
+        print("     router rewrites the file on every new equity high and would clobber it.")
+        print("  2. Copy to:  %s" % os.path.join(
+            nt8_state_dir() or "<Documents>/NinjaTrader 8/PropRouter",
+            os.path.basename(out)))
+        print("  3. Fully restart NinjaTrader, then start the strategies; each should")
+        print("     print 'peak seeded at ...'.")
+    print("")
+    print("  The file name carries the Book ID. This file only serves charts whose")
+    print("  Book ID property is exactly %r. A different Book ID looks for a" % args.book)
+    print("  different file, finds nothing, and every seat reports PEAK NOT SEEDED.")
     return 0
 
 
