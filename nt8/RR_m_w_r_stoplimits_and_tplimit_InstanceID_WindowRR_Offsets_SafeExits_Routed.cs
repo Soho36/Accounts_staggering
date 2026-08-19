@@ -528,8 +528,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         /// <summary>
         /// Both unrouted modes let EVERY enabled window trade on this account. Neither is a dry run.
-        /// That preserves the legacy per-chart exposure split, but if all six charts share the same
-        /// all-window config it means six copies of every signal - R=6 on a book sized for R=1.
+        /// If all six charts share the same all-window config, an unrouted mode means six copies of
+        /// every signal - R=6 on a book sized for R=1.
+        ///
+        /// Note that a per-chart window split is NOT a workaround: the 24 window R:R values are part
+        /// of the book manifest fingerprint, so charts with differing windows cannot register into
+        /// the same book and no preview is produced. There is no configuration in which an unrouted
+        /// mode yields a meaningful routing preview on the live book. Use Playback with simulation
+        /// accounts instead.
         /// </summary>
         private void WarnIfUnrouted()
         {
@@ -546,7 +552,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                   $"{enabled} of its enabled windows, unrouted.");
             Print($"[{EntrySignalName}] ⚠️ If every chart in book '{BookId}' has the same windows enabled, " +
                   $"the book is running {enabled}-window copies on all seats, not R={GlobalCopies}. " +
-                  $"Keep the legacy per-chart window split until you switch to Routed.");
+                  $"Giving each chart different windows does NOT help: the window R:R values are part " +
+                  $"of the book manifest, so mismatched charts cannot register and produce no preview.");
         }
 
         private void RegisterSeat()

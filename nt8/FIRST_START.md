@@ -114,6 +114,52 @@ form the router's strict parser requires. Copy it into place with every strategy
 stopped; the router rewrites this file on every new equity high and will clobber
 an edit made while it is running.
 
+## 3b. When the peak file must be re-seeded
+
+The peak file is **persistent**. It is not rebuilt per session: the router reads
+it once per book per NT8 process and rewrites it on every new equity high. A
+normal shutdown does not invalidate it.
+
+The peak only advances while NT8 is running and receiving account updates, and
+account equity only moves when something trades. So the file goes stale exactly
+when equity moved while the router was not watching.
+
+| Situation | Re-seed? |
+|---|---|
+| Weekend or overnight shutdown, all accounts flat | No |
+| Routine restart, flat, no orders | No |
+| Disable and re-enable a strategy, NT8 still running | No (and the file would not be re-read anyway) |
+| Connection loss while all accounts were flat | No |
+| Connection loss or crash **while a position was open** | **Yes** |
+| NT8 closed with an open position | **Yes** |
+| Any manual or external trade on a seat account | **Yes** |
+| Payout, withdrawal or other broker balance adjustment | **Yes** |
+| Account reset, replacement or tier change | **Yes** |
+
+A stale peak is always stale **low**, which makes the modelled floor too low and
+headroom too high — the seat looks healthier than it is and attracts trades it
+should not get. That is the one error direction that actively hurts, so never
+assume; verify.
+
+Verification costs seconds. Export a fresh broker statement and run:
+
+```bash
+python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
+```
+
+Exit code `0` means the file is current and NT8 can start. Exit `1` lists the
+stale seats; re-run without `--check` to rewrite. Make this part of the
+start-of-day routine rather than something you remember to do after an incident.
+
+Partial self-healing exists but cannot be relied on: on reconnect the router
+ratchets `peak` up to current equity, so a high that is *still* in place is
+recovered automatically. A high that was made and given back while NT8 was blind
+is lost, and only a fresh statement will reveal it.
+
+> **A replaced peak file needs a full NinjaTrader restart.** The load is latched
+> per book per process, so disabling and re-enabling the strategies will silently
+> keep using the old peaks. Close NT8 completely, replace the file, then start.
+
 ## 3. Create the peak file manually
 
 Use this path for simulation books, or when no broker statement is available.

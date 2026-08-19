@@ -105,7 +105,8 @@ def build_seed(row):
     account = row.get("Account", "")
     if account not in SEAT_CONFIG:
         raise SeedError("account %r is not in SEAT_CONFIG; add it with the exact "
-                        "start balance and drawdown configured on its chart" % account)
+                        "start balance and drawdown configured on its chart"
+                        "!!!CHECK CSV STRUCTURE!!!" % account)
 
     status = row.get("Status", "")
     if status.lower() != "active":
