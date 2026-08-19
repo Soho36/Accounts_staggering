@@ -72,47 +72,94 @@ The recovered study uses `frozen_offset = 100`. Compare the calculated floor
 with the broker's displayed liquidation threshold/cushion. A mismatch is a stop
 condition; do not “correct” it by guessing a different peak.
 
-## 3a. Generate the peak file from a broker statement (real accounts)
+## 3a. Generate the peak file with make_peak_file.py
 
-For the six real Apex seats, do not hand-derive the peaks. Export the account
-statement CSV from the broker and run:
+Do not hand-derive peaks. `make_peak_file.py` builds the file, verifies every row
+against the broker's own numbers, and refuses to write anything that does not
+reconcile. Run it from the `nt8` folder.
 
-```bash
-python make_peak_file.py Broker_statement.csv --book LIVE
-```
+### Commands
 
-The statement must contain the columns `Account`, `Status`, `Account Balance`,
+| Purpose | Command |
+|---|---|
+| Live book, write locally | `python make_peak_file.py Broker_statement.csv --book LIVE` |
+| Live book, write into NinjaTrader | `python make_peak_file.py Broker_statement.csv --book LIVE --install` |
+| Simulation book | `python make_peak_file.py --seats sim --book SIM --install` |
+| Verify a live file is current | `python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv` |
+| Verify a simulation file | `python make_peak_file.py --seats sim --check peaks_SIM.csv` |
+| Non-standard NinjaTrader folder | add `--nt8-dir "D:\path\to\PropRouter"` |
+
+`--install` writes straight into `Documents\NinjaTrader 8\PropRouter\` and names
+the file from `--book`, so the Book ID is typed once instead of twice. Without it
+the file lands in the current directory and the script prints the exact
+destination to copy it to. `--install` and `--out` cannot be combined.
+
+`--check` exits `0` when the file is current and `1` when any seat is stale, so
+it can be wired into a pre-start check.
+
+### Live book, from a broker statement
+
+Export the account statement CSV from the broker portal without reformatting it.
+It must contain `Account`, `Status`, `Account Balance`,
 `Auto Liquidate Threshold Value`, `Auto Liquidate EOD Value` and
-`Auto Liquidate Peak Balance`.
+`Auto Liquidate Peak Balance`; a missing column is reported by name.
 
-The script picks the correct broker floor per account automatically - the
-threshold column for intraday-trailing seats, the EOD column for end-of-day
-seats - and emits `peak = broker_floor + drawdown` so the router's own
-`min(peak - dd, start + 100)` lands exactly on the broker's published threshold.
-It then recomputes that floor for every row and refuses to write anything if a
-single row disagrees. It also prints the resulting headroom per seat and the
-max-headroom ranking, which is the order the router will prefer.
+The seed is the broker's own governing high-water mark,
+`Auto Liquidate Peak Balance`, used unmodified. The script then proves it:
 
-`start_balance` and `drawdown` come from the `SEAT_CONFIG` table at the top of
-the script. **These must match each chart's Seat starting balance and Seat
-trailing drawdown exactly** - the router compares them with an exact equality
-test and refuses to register a seat on any mismatch. Edit that table, not the
-generated CSV, if a value is wrong.
+- **Intraday seat, not yet frozen.** `peak - threshold` *is* the drawdown, so it
+  must equal the configured value exactly. This is what catches a wrong
+  `SEAT_CONFIG` drawdown before it can reach the router.
+- **Intraday seat, frozen.** That identity no longer holds because the floor is
+  pinned, so the script verifies `threshold == start + frozen offset` instead.
+- **End-of-day seat** (`Auto Liquidate EOD Value` populated, threshold blank).
+  Modelled as intraday, and the script proves the modelled floor sits at or
+  above the broker's real EOD floor, reporting the gap. A modelled floor *below*
+  it would overstate headroom and is refused.
 
-To confirm an existing file is still current after an NT8 outage, export a fresh
-statement and run:
+Any disagreement prints both sides and blames neither - a wrong `SEAT_CONFIG`
+and a stale or edited statement produce the same symptom.
 
-```bash
-python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
-```
+### Simulation book, with no statement
 
-It exits `0` when the file matches and `1` when any seat is stale, so it can be
-wired into a pre-start check.
+Simulation accounts have no broker statement. An account that has never traded
+has no high-water mark above its starting balance, so the script seeds
+`peak = start` directly from `SEAT_CONFIG_SIM`, giving each seat its full
+drawdown as headroom. No statement argument is needed or accepted.
 
-The generated file is UTF-8 without BOM, LF endings, period decimals - the exact
-form the router's strict parser requires. Copy it into place with every strategy
-stopped; the router rewrites this file on every new equity high and will clobber
-an edit made while it is running.
+This is correct **only before those accounts trade**. Once they have, the real
+peak may be higher, and seeding at the starting balance would put the floor too
+low and overstate headroom. Reset the simulation accounts in NinjaTrader and
+re-run rather than guessing a value.
+
+`SEAT_CONFIG_SIM` mirrors the live drawdown mix (1500/1500/2000/2000/2000/2500)
+so Playback exercises the same ranking dynamics as the real book. Its `start`
+values must equal the simulation accounts' actual starting balances in
+NinjaTrader, because the router measures headroom against real account equity.
+The start balance does not change the dynamics: a seat freezes once its peak
+reaches `start + dd + frozen offset`, so the distance to freeze is `dd + 100`
+wherever the account starts.
+
+### What must match the charts
+
+`start_balance` and `drawdown` come from the `SEAT_CONFIG` / `SEAT_CONFIG_SIM`
+table at the top of the script. **They must equal each chart's Seat starting
+balance and Seat trailing drawdown exactly** - the router compares them with an
+exact equality test and refuses to register the seat on any mismatch. Edit the
+table, never the generated CSV. Every run prints the per-chart values to enter.
+
+The script also validates the table itself: Instance IDs must be unique and
+cover `1..N` with no gaps, which is what the router's quorum requires.
+
+### Output guarantees
+
+The generated file is UTF-8 without BOM, LF endings, period decimals, exact
+header, five fields per row - the precise form the router's strict parser
+accepts. It never needs hand editing, and must never be written from Excel.
+
+Copy or install it with **every strategy stopped**: the router rewrites this file
+on every new equity high and will clobber an edit made while it is running.
+
 
 ## 3b. When the peak file must be re-seeded
 
@@ -199,12 +246,12 @@ The previously collected future-live reference values were:
 
 ```csv
 account,start_balance,drawdown,peak,updated_utc
-PA-APEX-240737-09,25000.00,1500.00,26600.00,2026-08-17T00:00:00Z
-PA-APEX-240737-10,25000.00,1500.00,26600.00,2026-08-17T00:00:00Z
-PA-APEX-240737-12,50000.00,2500.00,51228.65,2026-08-17T00:00:00Z
-PA-APEX-240737-13,50000.00,2500.00,50480.45,2026-08-17T00:00:00Z
-PA-APEX-240737-14,50000.00,2500.00,50838.31,2026-08-17T00:00:00Z
-PA-APEX-240737-15,50000.00,2500.00,50844.85,2026-08-17T00:00:00Z
+PA-APEX-240737-09,25000.00,1500.00,28903.95,2026-08-19T00:00:00Z
+PA-APEX-240737-10,25000.00,1500.00,27870.23,2026-08-19T00:00:00Z
+PA-APEX-240737-12,50000.00,2000.00,51228.65,2026-08-19T00:00:00Z
+PA-APEX-240737-13,50000.00,2000.00,50480.45,2026-08-19T00:00:00Z
+PA-APEX-240737-14,50000.00,2000.00,50338.31,2026-08-19T00:00:00Z
+PA-APEX-240737-15,50000.00,2500.00,50844.85,2026-08-19T00:00:00Z
 ```
 
 These are an audit reference, **not values to copy blindly**. Re-read fresh

@@ -31,9 +31,11 @@ understated, never overstated. The script proves that inequality per row and
 reports the size of the gap.
 
 Usage:
-    python make_peak_file.py Broker_statement.csv
-    python make_peak_file.py Broker_statement.csv --book LIVE --out peaks_LIVE.csv
-    python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
+    python make_peak_file.py Broker_statement.csv --book LIVE               ---> Live book, write locally
+    python make_peak_file.py Broker_statement.csv --book LIVE --install     ---> Live book, write into NinjaTrader
+    python make_peak_file.py --seats sim --book SIM --install`              ---> Simulation book
+    python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv    ---> Verify a live file is current
+    python make_peak_file.py --seats sim --check peaks_SIM.csv              ---> Verify a simulation file
 """
 
 from __future__ import print_function
@@ -64,6 +66,28 @@ SEAT_CONFIG = {
     "PA-APEX-240737-15": {"instance": 6, "start": "50000", "dd": "2500", "kind": "intraday"},
 }
 
+# Simulation book. The drawdowns mirror the live mix (1500/1500/2000/2000/2000/2500)
+# so Playback exercises the same max_headroom ranking dynamics as the real book.
+#
+# "start" must equal the SIM account's actual starting balance in NinjaTrader, not
+# the live tier - the router measures headroom against real account equity. The
+# start balance does not affect the dynamics anyway: a seat freezes once its peak
+# reaches start + dd + frozen_offset, so the distance to freeze is dd + 100
+# regardless of where the account starts.
+#
+# Every seat is "intraday" here: the router models all seats that way, and a
+# simulation account has no end-of-day broker rule to reproduce.
+SEAT_CONFIG_SIM = {
+    "SIM101": {"instance": 1, "start": "100000", "dd": "1500", "kind": "intraday"},
+    "SIM102": {"instance": 2, "start": "100000", "dd": "1500", "kind": "intraday"},
+    "SIM103": {"instance": 3, "start": "100000", "dd": "2000", "kind": "intraday"},
+    "SIM104": {"instance": 4, "start": "100000", "dd": "2000", "kind": "intraday"},
+    "SIM105": {"instance": 5, "start": "100000", "dd": "2000", "kind": "intraday"},
+    "SIM106": {"instance": 6, "start": "100000", "dd": "2500", "kind": "intraday"},
+}
+
+SEAT_CONFIGS = {"live": SEAT_CONFIG, "sim": SEAT_CONFIG_SIM}
+
 # Must be identical on every chart: it is part of the book manifest fingerprint.
 FROZEN_OFFSET = Decimal("100")
 HEADER = "account,start_balance,drawdown,peak,updated_utc"
@@ -82,6 +106,42 @@ REQUIRED_COLUMNS = (
 
 class SeedError(Exception):
     pass
+
+
+def validate_seat_config(cfg, label):
+    """Catch config mistakes that would otherwise surface as unregisterable charts."""
+    if not cfg:
+        raise SeedError("SEAT_CONFIG for %r is empty" % label)
+
+    instances = {}
+    for account, c in sorted(cfg.items()):
+        for key in ("instance", "start", "dd", "kind"):
+            if key not in c:
+                raise SeedError("%s seat %s is missing %r" % (label, account, key))
+        if c["kind"] not in ("intraday", "eod"):
+            raise SeedError("%s seat %s has kind %r; expected 'intraday' or 'eod'"
+                            % (label, account, c["kind"]))
+        try:
+            start = Decimal(c["start"])
+            dd = Decimal(c["dd"])
+        except InvalidOperation:
+            raise SeedError("%s seat %s has a non-numeric start or dd" % (label, account))
+        if start <= 0 or dd <= 0:
+            raise SeedError("%s seat %s needs start and dd greater than zero" % (label, account))
+
+        inst = c["instance"]
+        if inst in instances:
+            raise SeedError(
+                "%s seats %s and %s both use Instance ID %d. Each chart in a book needs "
+                "its own ID, and the router requires every ID from 1 to the seat count "
+                "exactly once." % (label, instances[inst], account, inst))
+        instances[inst] = account
+
+    expected = set(range(1, len(cfg) + 1))
+    if set(instances) != expected:
+        raise SeedError(
+            "%s Instance IDs are %s; with %d seats they must be exactly %s"
+            % (label, sorted(instances), len(cfg), sorted(expected)))
 
 
 def disagreement(account, pairs, explain):
@@ -158,20 +218,20 @@ def read_statement(path):
     return cleaned
 
 
-def build_seed(row):
+def build_seed(row, seat_config):
     account = row.get("Account", "")
-    if account not in SEAT_CONFIG:
+    if account not in seat_config:
         raise SeedError(
             "the statement contains account %r, which is not in SEAT_CONFIG.\n"
             "  configured seats: %s\n"
             "  Add it with the exact start balance and drawdown set on its chart, "
-            "or remove it from the statement." % (account, ", ".join(sorted(SEAT_CONFIG))))
+            "or remove it from the statement." % (account, ", ".join(sorted(seat_config))))
 
     status = row.get("Status", "")
     if status.lower() != "active":
         raise SeedError("account %s has status %r, not Active" % (account, status))
 
-    cfg = SEAT_CONFIG[account]
+    cfg = seat_config[account]
     start = Decimal(cfg["start"])
     dd = Decimal(cfg["dd"])
     kind = cfg["kind"]
@@ -274,6 +334,39 @@ def build_seed(row):
     }
 
 
+def build_untraded_seeds(seat_config):
+    """Seed brand-new accounts that have no trading history and so no statement.
+
+    An account that has never traded has no high-water mark above its starting
+    balance, so peak = start, floor = start - dd, and the full drawdown is
+    available. This is ONLY correct before the account trades: once it has, the
+    real peak may be higher and seeding at start would put the floor too low and
+    overstate headroom. Reset the simulation accounts rather than guessing.
+    """
+    seeds = []
+    for account, cfg in seat_config.items():
+        start = Decimal(cfg["start"])
+        dd = Decimal(cfg["dd"])
+        peak = start
+        floor = model_floor(peak, dd, start)
+        seeds.append({
+            "account": account,
+            "instance": cfg["instance"],
+            "start": start,
+            "dd": dd,
+            "kind": cfg["kind"],
+            "peak": peak,
+            "balance": start,
+            "floor": floor,
+            "broker_floor": floor,
+            "headroom": start - floor,
+            "frozen": False,
+            "freeze_at": start + FROZEN_OFFSET + dd,
+            "note": "untraded",
+        })
+    return seeds
+
+
 def write_peak_file(seeds, path, stamp):
     lines = [HEADER]
     for s in sorted(seeds, key=lambda x: x["account"]):
@@ -357,7 +450,10 @@ def check_existing(seeds, path):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Build or verify a PropRouter peak file from a broker statement.")
-    ap.add_argument("statement", help="broker statement CSV")
+    ap.add_argument("statement", nargs="?", default=None,
+                    help="broker statement CSV (required for --seats live)")
+    ap.add_argument("--seats", choices=sorted(SEAT_CONFIGS), default="live",
+                    help="which SEAT_CONFIG table to use (default: live)")
     ap.add_argument("--book", default="LIVE", help="Book ID (default: LIVE)")
     ap.add_argument("--out", default=None,
                     help="output path (default: peaks_<BOOK>.csv)")
@@ -370,25 +466,57 @@ def main(argv=None):
                     help="override the NinjaTrader PropRouter directory used by --install")
     args = ap.parse_args(argv)
 
+    seat_config = SEAT_CONFIGS[args.seats]
+
     try:
-        rows = read_statement(args.statement)
-        seeds = [build_seed(r) for r in rows]
+        validate_seat_config(seat_config, args.seats)
+
+        if args.statement and args.seats == "sim":
+            raise SeedError(chr(10).join([
+                "--seats sim does not take a broker statement.",
+                "",
+                "  Simulation accounts have no broker statement. Peaks come from",
+                "  SEAT_CONFIG_SIM with peak = start, which is correct while those",
+                "  accounts are untraded.",
+                "",
+                "  Run instead:",
+                "      python make_peak_file.py --seats sim --book %s --install" % args.book,
+                "",
+                "  If they have already traded, reset them in NinjaTrader and re-run.",
+                "  Do not hand-write a statement to approximate their peaks: every",
+                "  number in it must satisfy the same checks as a real broker export,",
+                "  including peak - threshold == the configured drawdown.",
+            ]))
+
+        if args.statement:
+            rows = read_statement(args.statement)
+            seeds = [build_seed(r, seat_config) for r in rows]
+            missing = set(seat_config) - set(s["account"] for s in seeds)
+            if missing:
+                raise SeedError("statement is missing configured seats: %s"
+                                % ", ".join(sorted(missing)))
+            source = args.statement
+        elif args.seats == "live":
+            raise SeedError("a broker statement is required for --seats live")
+        else:
+            seeds = build_untraded_seeds(seat_config)
+            source = "SEAT_CONFIG_SIM (no statement; accounts assumed untraded)"
     except SeedError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 2
 
-    missing = set(SEAT_CONFIG) - set(s["account"] for s in seeds)
-    if missing:
-        print("ERROR: statement is missing configured seats: %s"
-              % ", ".join(sorted(missing)), file=sys.stderr)
-        return 2
-
-    print("Read %d active seats from %s" % (len(seeds), args.statement))
+    print("Prepared %d seats from %s" % (len(seeds), source))
+    if not args.statement:
+        print("")
+        print("  Seeded at the starting balance, which is correct ONLY while these")
+        print("  accounts have never traded. If they have, reset them in NinjaTrader")
+        print("  and re-run - a peak below the real high-water mark overstates headroom.")
     report(seeds)
 
     if args.check:
         print("")
-        print("Checking %s against the statement:" % args.check)
+        print("Checking %s against %s:"
+              % (args.check, "the statement" if args.statement else "SEAT_CONFIG"))
         try:
             ok = check_existing(seeds, args.check)
         except SeedError as exc:

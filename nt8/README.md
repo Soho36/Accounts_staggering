@@ -159,10 +159,15 @@ reference data only while this version remains simulation/playback-only.
 |---|---:|---:|---:|---|
 | PA-APEX-240737-09 | 1 | 25000 | 1500 | 25K |
 | PA-APEX-240737-10 | 2 | 25000 | 1500 | 25K |
-| PA-APEX-240737-12 | 3 | 50000 | 2500 | 50K |
-| PA-APEX-240737-13 | 4 | 50000 | 2500 | 50K |
-| PA-APEX-240737-14 | 5 | 50000 | 2500 | 50K |
+| PA-APEX-240737-12 | 3 | 50000 | 2000 | 50K, end-of-day |
+| PA-APEX-240737-13 | 4 | 50000 | 2000 | 50K, end-of-day |
+| PA-APEX-240737-14 | 5 | 50000 | 2000 | 50K |
 | PA-APEX-240737-15 | 6 | 50000 | 2500 | 50K |
+
+The drawdowns are **not uniform**. The statement proves each one: for an
+intraday seat that has not frozen, `Auto Liquidate Peak Balance` minus
+`Auto Liquidate Threshold Value` is exactly the drawdown. `make_peak_file.py`
+enforces that identity, so a wrong value here cannot reach the router.
 
 For Playback, create **six distinct simulation accounts**, one per seat. Do not
 use six charts all assigned to Sim101. Shared Sim101 charts share account equity
@@ -302,28 +307,49 @@ matters once those accounts clear roughly +$2,600.
 An unseeded seat can publish state but cannot satisfy the full-book quorum.
 Current equity is never allowed to bootstrap a trusted peak.
 
-Reference values from the broker sheet:
+### Generating the file
 
-| Seat | Source | Peak | Floor | Headroom |
-|---|---|---:|---:|---:|
-| `-09` | threshold + dd | 26600.00 | 25100.00 | 2993.18 |
-| `-10` | threshold + dd | 26600.00 | 25100.00 | 2570.70 |
-| `-12` | sheet **Peak** column (EOD) | 51228.65 | 48728.65 | 1159.71 |
-| `-13` | sheet **Peak** column (EOD) | 50480.45 | 47980.45 | 2235.89 |
-| `-14` | threshold + dd | 50838.31 | 48338.31 | 1526.87 |
-| `-15` | threshold + dd | 50844.85 | 48344.85 | 2319.43 |
+Never hand-derive a peak. Use `make_peak_file.py`; the full procedure, every
+flag and the failure modes are in [FIRST_START.md](FIRST_START.md) section 3a.
 
-All four accounts with a published threshold reproduce the broker cushion to the
-cent. For an intraday seat, do not substitute the sheet's closed-balance Peak:
-`-14` would understate its governing peak and floor by $500. For the EOD seats,
-the closed-balance peak is the intended source.
+```bash
+# live book, from a broker statement, written into NinjaTrader
+python make_peak_file.py Broker_statement.csv --book LIVE --install
 
-The current max-headroom ordering is:
+# simulation book, no statement needed (untraded accounts only)
+python make_peak_file.py --seats sim --book SIM --install
+
+# verify an existing file before starting NinjaTrader (exit 0 current, 1 stale)
+python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
+```
+
+The seed is the broker's `Auto Liquidate Peak Balance`, used unmodified. The
+script verifies every row against the broker's own floor and writes nothing if
+any row disagrees.
+
+Snapshot of the live book at the time of writing - the script is the source of
+truth, these values drift with every trade:
+
+| Seat | dd | Broker rule | Balance | Floor | Peak seed | Headroom |
+|---|---:|---|---:|---:|---:|---:|
+| `-09` | 1500 | intraday | 28142.66 | 25100.00 | 28903.95 | 3042.66 (frozen) |
+| `-10` | 1500 | intraday | 27759.66 | 25100.00 | 27870.23 | 2659.66 (frozen) |
+| `-12` | 2000 | end-of-day | 49888.36 | 49228.65 | 51228.65 | 659.71 |
+| `-13` | 2000 | end-of-day | 50354.80 | 48480.45 | 50480.45 | 1874.35 |
+| `-14` | 2000 | intraday | 49689.16 | 48338.31 | 50338.31 | 1350.85 |
+| `-15` | 2500 | intraday | 50664.28 | 48344.85 | 50844.85 | 2319.43 |
+
+The four seats with a published threshold reproduce the broker's cushion to the
+cent, which is the check that the model is right. The two end-of-day seats are
+modelled as intraday, so their floors sit slightly **above** the broker's real
+EOD floor (+12.01 and +64.83) - understated headroom, the safe direction.
+
+Max-headroom ordering at that snapshot:
 
 ```text
-1. -09  2993.18      4. -13  2235.89
-2. -10  2570.70      5. -14  1526.87
-3. -15  2319.43      6. -12  1159.71
+1. -09  3042.66      4. -13  1874.35
+2. -10  2659.66      5. -14  1350.85
+3. -15  2319.43      6. -12   659.71
 ```
 
 Max-headroom is not a fairness policy. A thinner seat can legitimately receive
@@ -342,16 +368,28 @@ For the future live book, the reference file is:
 
 ```csv
 account,start_balance,drawdown,peak,updated_utc
-PA-APEX-240737-09,25000.00,1500.00,26600.00,2026-08-17T00:00:00Z
-PA-APEX-240737-10,25000.00,1500.00,26600.00,2026-08-17T00:00:00Z
-PA-APEX-240737-12,50000.00,2500.00,51228.65,2026-08-17T00:00:00Z
-PA-APEX-240737-13,50000.00,2500.00,50480.45,2026-08-17T00:00:00Z
-PA-APEX-240737-14,50000.00,2500.00,50838.31,2026-08-17T00:00:00Z
-PA-APEX-240737-15,50000.00,2500.00,50844.85,2026-08-17T00:00:00Z
+PA-APEX-240737-09,25000.00,1500.00,28903.95,2026-08-19T00:00:00Z
+PA-APEX-240737-10,25000.00,1500.00,27870.23,2026-08-19T00:00:00Z
+PA-APEX-240737-12,50000.00,2000.00,51228.65,2026-08-19T00:00:00Z
+PA-APEX-240737-13,50000.00,2000.00,50480.45,2026-08-19T00:00:00Z
+PA-APEX-240737-14,50000.00,2000.00,50338.31,2026-08-19T00:00:00Z
+PA-APEX-240737-15,50000.00,2500.00,50844.85,2026-08-19T00:00:00Z
 ```
 
-Playback needs the same shape but must use the six distinct simulation-account
-names and the corresponding configured start balances and drawdowns.
+The Playback book has the same shape with the simulation-account names and
+their configured start balances and drawdowns:
+
+```csv
+account,start_balance,drawdown,peak,updated_utc
+SIM101,100000.00,1500.00,100000.00,2026-08-19T00:00:00Z
+SIM102,100000.00,1500.00,100000.00,2026-08-19T00:00:00Z
+SIM103,100000.00,2000.00,100000.00,2026-08-19T00:00:00Z
+SIM104,100000.00,2000.00,100000.00,2026-08-19T00:00:00Z
+SIM105,100000.00,2000.00,100000.00,2026-08-19T00:00:00Z
+SIM106,100000.00,2500.00,100000.00,2026-08-19T00:00:00Z
+```
+
+Both are produced by `make_peak_file.py`; neither should be typed by hand.
 
 Parsing is deliberately strict and fail-closed:
 
