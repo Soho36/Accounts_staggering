@@ -70,8 +70,33 @@ HEADER = "account,start_balance,drawdown,peak,updated_utc"
 TOL = Decimal("0.005")          # half a cent
 
 
+REQUIRED_COLUMNS = (
+    "Account",
+    "Status",
+    "Account Balance",
+    "Auto Liquidate Threshold Value",
+    "Auto Liquidate EOD Value",
+    "Auto Liquidate Peak Balance",
+)
+
+
 class SeedError(Exception):
     pass
+
+
+def disagreement(account, pairs, explain):
+    """Format a statement-vs-config conflict without asserting which side is wrong."""
+    width = max(len(k) for k, _ in pairs)
+    out = ["", "account %s: STATEMENT AND CONFIG DISAGREE" % account, ""]
+    for key, value in pairs:
+        out.append("    %-*s  %s" % (width, key, value))
+    out.append("")
+    out.append("  " + explain)
+    out.append("  Either the statement is stale, edited or misread, or SEAT_CONFIG is")
+    out.append("  wrong - and SEAT_CONFIG must also match the chart's Signal Routing")
+    out.append("  properties. Check the statement against the broker portal first.")
+    out.append("  No peak file was written or verified.")
+    return "\n".join(out)
 
 
 def dec(raw):
@@ -94,19 +119,43 @@ def model_floor(peak, dd, start, frozen_offset=FROZEN_OFFSET):
 
 def read_statement(path):
     with io.open(path, "r", encoding="utf-8-sig", newline="") as fh:
-        rows = list(csv.DictReader(fh))
+        reader = csv.DictReader(fh)
+        fields = [(f or "").strip() for f in (reader.fieldnames or [])]
+        rows = list(reader)
+
+    absent = [c for c in REQUIRED_COLUMNS if c not in fields]
+    if absent:
+        raise SeedError(
+            "%s is not a recognised broker statement.\n"
+            "  missing columns: %s\n"
+            "  columns found  : %s\n"
+            "  Re-export the account statement from the broker portal without "
+            "reformatting it." % (path, ", ".join(absent), ", ".join(fields) or "(none)"))
+
     if not rows:
-        raise SeedError("%s contains no data rows" % path)
-    return [dict(((k or "").strip(), (v or "").strip()) for k, v in row.items())
-            for row in rows]
+        raise SeedError("%s has the right columns but no data rows" % path)
+
+    cleaned = [dict(((k or "").strip(), (v or "").strip()) for k, v in row.items())
+               for row in rows]
+
+    seen = {}
+    for i, row in enumerate(cleaned, start=2):
+        name = row.get("Account", "")
+        if name in seen:
+            raise SeedError("%s lists account %s twice (rows %d and %d); one row "
+                            "per account is required" % (path, name, seen[name], i))
+        seen[name] = i
+    return cleaned
 
 
 def build_seed(row):
     account = row.get("Account", "")
     if account not in SEAT_CONFIG:
-        raise SeedError("account %r is not in SEAT_CONFIG; add it with the exact "
-                        "start balance and drawdown configured on its chart"
-                        "!!!CHECK CSV STRUCTURE!!!" % account)
+        raise SeedError(
+            "the statement contains account %r, which is not in SEAT_CONFIG.\n"
+            "  configured seats: %s\n"
+            "  Add it with the exact start balance and drawdown set on its chart, "
+            "or remove it from the statement." % (account, ", ".join(sorted(SEAT_CONFIG))))
 
     status = row.get("Status", "")
     if status.lower() != "active":
@@ -125,9 +174,9 @@ def build_seed(row):
     if balance is None:
         raise SeedError("account %s has no Account Balance" % account)
     if peak is None:
-        raise SeedError("account %s has no Auto Liquidate Peak Balance; the "
-                        "governing high-water mark is unknown and the seat "
-                        "cannot be seeded" % account)
+        raise SeedError("account %s has an empty Auto Liquidate Peak Balance cell. "
+                        "The governing high-water mark is unknown, so the seat "
+                        "cannot be seeded. Re-export the statement." % account)
 
     frozen_level = start + FROZEN_OFFSET
     floor = model_floor(peak, dd, start)
@@ -142,20 +191,25 @@ def build_seed(row):
         if frozen:
             # peak - dd is meaningless once the cap binds; verify the cap instead.
             if abs(threshold - frozen_level) > TOL:
-                raise SeedError(
-                    "account %s looks frozen but its threshold %s does not equal "
-                    "start + frozen_offset (%s). Check the start balance."
-                    % (account, threshold, frozen_level))
+                raise SeedError(disagreement(account, [
+                    ("Auto Liquidate Threshold Value", threshold),
+                    ("start balance + frozen offset", frozen_level),
+                    ("SEAT_CONFIG start balance", start),
+                    ("frozen floor offset", FROZEN_OFFSET),
+                ], "This seat's floor has frozen, so the threshold must equal "
+                   "start + frozen offset exactly."))
         else:
             # The statement proves its own drawdown. This is the check that
             # catches a wrong SEAT_CONFIG drawdown before it reaches the router.
             implied_dd = peak - threshold
             if abs(implied_dd - dd) > TOL:
-                raise SeedError(
-                    "account %s: statement implies drawdown %s "
-                    "(peak %s - threshold %s), but SEAT_CONFIG says %s. Fix "
-                    "SEAT_CONFIG and the chart's Seat trailing drawdown."
-                    % (account, implied_dd, peak, threshold, dd))
+                raise SeedError(disagreement(account, [
+                    ("Auto Liquidate Peak Balance", peak),
+                    ("Auto Liquidate Threshold Value", threshold),
+                    ("implied drawdown (peak - threshold)", implied_dd),
+                    ("SEAT_CONFIG drawdown", dd),
+                ], "For an intraday seat that has not frozen, peak minus threshold "
+                   "IS the drawdown, so these must match exactly."))
 
         if abs(floor - threshold) > TOL:
             raise SeedError("account %s: reconstructed floor %s does not match the "
@@ -171,10 +225,13 @@ def build_seed(row):
         # at or above the true drawdown. A value below it means dd is too large.
         implied_min_dd = peak - eod_value
         if implied_min_dd + TOL < dd:
-            raise SeedError(
-                "account %s: statement implies drawdown of at most %s "
-                "(peak %s - EOD floor %s), but SEAT_CONFIG says %s"
-                % (account, implied_min_dd, peak, eod_value, dd))
+            raise SeedError(disagreement(account, [
+                ("Auto Liquidate Peak Balance", peak),
+                ("Auto Liquidate EOD Value", eod_value),
+                ("implied maximum drawdown", implied_min_dd),
+                ("SEAT_CONFIG drawdown", dd),
+            ], "The intraday peak is at or above the end-of-day peak, so peak minus "
+               "the EOD floor cannot be smaller than the drawdown."))
 
         if floor + TOL < eod_value:
             raise SeedError(
