@@ -71,6 +71,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             new Dictionary<string, EntrySetup>(StringComparer.Ordinal);
         private EntrySetup submittingEntrySetup;
         private readonly List<EntrySetup> recentEntrySetups = new List<EntrySetup>();
+        private DateTime pendingWithoutOrderSince = Core.Globals.MinDate;
         private readonly object exitOrdersSync = new object();
         private readonly List<Order> stopOrders = new List<Order>();
         private readonly List<Order> takeProfitOrders = new List<Order>();
@@ -765,6 +766,80 @@ namespace NinjaTrader.NinjaScript.Strategies
             return true;
         }
 
+        /// <summary>Authoritative broker check: does this account hold any live order of ours?</summary>
+        private bool HasLiveOrderOnAccount()
+        {
+            try
+            {
+                if (Account == null || Instrument == null)
+                    return true;    // cannot prove absence - assume yes and stay reserved
+
+                lock (Account.Orders)
+                {
+                    foreach (Order order in Account.Orders)
+                    {
+                        if (order == null || order.Instrument == null)
+                            continue;
+                        if (!string.Equals(order.Instrument.FullName, Instrument.FullName,
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (IsOurSignalName(order.Name) && IsActiveOrder(order))
+                            return true;
+                    }
+                }
+                return false;
+            }
+            catch { return true; }
+        }
+
+        /// <summary>
+        /// A Pending reservation that no broker order backs would otherwise hold a slot
+        /// forever: the router subtracts every Pending seat from R, so at R=1 one stuck
+        /// seat silently halts the WHOLE book. A null or throwing submission leaves exactly
+        /// that state. Release it only once the broker proves nothing exists - flat account,
+        /// no live order of ours, no submission in flight - and only after a grace period.
+        /// </summary>
+        private void TryReconcileStuckPending()
+        {
+            if (!routerRegistered)
+                return;
+
+            bool inFlight;
+            lock (entrySetupsSync)
+                inFlight = submittingEntrySetup != null;
+
+            bool pending;
+            lock (routerStatusSync)
+                pending = routerSeatStatus == SeatStatus.Pending;
+
+            bool positionOpen = PositionAccount != null
+                && PositionAccount.MarketPosition != MarketPosition.Flat;
+
+            if (inFlight || !pending || positionOpen
+                || IsActiveOrder(longOrder) || HasActiveExitOrders()
+                || HasLiveOrderOnAccount())
+            {
+                pendingWithoutOrderSince = Core.Globals.MinDate;
+                return;
+            }
+
+            if (pendingWithoutOrderSince == Core.Globals.MinDate)
+            {
+                pendingWithoutOrderSince = DateTime.UtcNow;
+                Print($"[{EntrySignalName}] ⚠️ seat is Pending but the account is flat with no live " +
+                      "order of ours; will release the reservation if this persists");
+                return;
+            }
+
+            if ((DateTime.UtcNow - pendingWithoutOrderSince).TotalSeconds < 30.0)
+                return;
+
+            Print($"[{EntrySignalName}] ⚠️ releasing an unbacked Pending reservation to Free. " +
+                  "The submission never reached the broker; the seat is available again.");
+            SetRouterStatus(SeatStatus.Free);
+            pendingWithoutOrderSince = Core.Globals.MinDate;
+        }
+
         private bool IsOurSignalName(string name)
         {
             // Block adoption under a changed InstanceId too: an old broker-held order
@@ -1051,43 +1126,52 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         /// <summary>
-        /// Picks the setup that actually belongs to this fill. Normally the bound one, but
-        /// if its stop is not below the fill price the binding is stale - a re-price whose
-        /// modification the broker never applied - so fall back to the recent candle whose
-        /// entry price the fill matches. Only if nothing usable is found does the caller
-        /// resort to the emergency market exit.
+        /// Picks the setup that actually belongs to this fill, identified by PRICE rather
+        /// than by binding order.
+        ///
+        /// A stop-limit entry fills at its own stop/limit price, so the candle whose entry
+        /// price equals the fill price is the candle that filled. That test survives the
+        /// two races the binding cannot: a synchronous fill during submission (the binding
+        /// has not been rewritten yet) and a re-price the broker never applied (the binding
+        /// has been rewritten too early).
+        ///
+        /// If no candle matches the fill price, the trade is NOT reconstructed from an
+        /// unrelated candle - that would create a position with a stop and R:R target
+        /// belonging to neither the original strategy nor the exported data. The caller
+        /// falls through to the emergency market exit instead.
         /// </summary>
         private EntrySetup ResolveSetupForFill(Execution execution, string orderId, double fillPrice)
         {
-            EntrySetup bound = ResolveExecutionSetup(execution, orderId);
-            if (bound != null && bound.StopPrice < fillPrice)
-                return bound;
-
             double halfTick = TickSize / 2.0;
+
             lock (entrySetupsSync)
             {
+                // A submission in flight is the newest candle and may not be bound yet.
+                if (submittingEntrySetup != null
+                    && submittingEntrySetup.StopPrice < fillPrice
+                    && Math.Abs(submittingEntrySetup.EntryPrice - fillPrice) < halfTick)
+                    return submittingEntrySetup;
+
                 for (int i = recentEntrySetups.Count - 1; i >= 0; i--)
                 {
                     EntrySetup s = recentEntrySetups[i];
                     if (s.StopPrice < fillPrice && Math.Abs(s.EntryPrice - fillPrice) < halfTick)
-                    {
-                        Print($"[{EntrySignalName}] ⚠️ bound setup was stale for a fill at {fillPrice}; " +
-                              $"recovered the {s.SignalTime} candle (stop {s.StopPrice}, R:R {s.RiskReward})");
                         return s;
-                    }
-                }
-                for (int i = recentEntrySetups.Count - 1; i >= 0; i--)
-                {
-                    EntrySetup s = recentEntrySetups[i];
-                    if (s.StopPrice < fillPrice)
-                    {
-                        Print($"[{EntrySignalName}] ⚠️ bound setup was stale for a fill at {fillPrice}; " +
-                              $"falling back to the {s.SignalTime} candle (stop {s.StopPrice})");
-                        return s;
-                    }
                 }
             }
-            return bound;
+
+            // No price match. Accept the bound setup only if it is self-consistent.
+            EntrySetup bound = ResolveExecutionSetup(execution, orderId);
+            if (bound != null && bound.StopPrice < fillPrice)
+            {
+                Print($"[{EntrySignalName}] ⚠️ no candle matches a fill at {fillPrice}; " +
+                      $"using the bound {bound.SignalTime} setup (stop {bound.StopPrice})");
+                return bound;
+            }
+
+            Print($"[{EntrySignalName}] ⛔ cannot identify the candle behind a fill at {fillPrice}; " +
+                  "refusing to reconstruct the trade from an unrelated setup");
+            return null;
         }
 
         private void EndEntrySetupSubmission(EntrySetup setup)
@@ -1278,6 +1362,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             // Keep the registry current even on bars that produce no signal.
             PublishEquity();
+            TryReconcileStuckPending();
             PublishStatus();
 
             // End-of-session flattening is delegated entirely to NinjaTrader's built-in
@@ -1395,18 +1480,30 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (execution != null && execution.Name == EntrySignalName && quantity > 0)
             {
-                // The entry order is re-priced in place, so the setup bound to this order id
-                // is the one that actually filled. Falls back to the pending fields if the
-                // binding is missing.
+                // The candle behind this fill is identified by price. A null result means it
+                // could not be identified at all; do NOT fall back to the shared pending
+                // fields, which hold the newest candle and would attach a stop and R:R target
+                // belonging to a different trade.
                 EntrySetup fillSetup = ResolveSetupForFill(execution, orderId, price);
-                double fillStopPrice = fillSetup == null ? pendingStopPrice : fillSetup.StopPrice;
-                double fillRiskReward = fillSetup == null ? pendingRiskReward : fillSetup.RiskReward;
-                pendingStopPrice = fillStopPrice;
-                pendingRiskReward = fillRiskReward;
+
                 lock (routerStatusSync)
                     strategyPositionFlat = false;
                 SetRouterStatus(SeatStatus.InPosition);
                 ClearTakeProfitSubmitted();
+
+                if (fillSetup == null)
+                {
+                    Print($"[{time}] [{EntrySignalName}] ⛔ filled at {price} with no identifiable " +
+                          "setup; submitting emergency market exit");
+                    ExitLong(EmergencyExitName, EntrySignalName);
+                    longOrder = null;
+                    return;
+                }
+
+                double fillStopPrice = fillSetup.StopPrice;
+                double fillRiskReward = fillSetup.RiskReward;
+                pendingStopPrice = fillStopPrice;
+                pendingRiskReward = fillRiskReward;
 
                 if (quantity > 0 && fillRiskReward > 0)
                     positionRiskReward = fillRiskReward;
