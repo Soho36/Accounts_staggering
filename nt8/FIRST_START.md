@@ -15,7 +15,7 @@ to `Documents\NinjaTrader 8\bin\Custom\Strategies\`. Do not copy the local
 1. Disable every strategy instance and close NinjaTrader. All six accounts must be flat and must have
    no working orders for the instrument.
 2. Choose one Book ID containing only letters, digits, `-`, or `_`, for example
-   `PLAYBACK_ROUTER_V2`. Do not reuse a live-looking Book ID for testing.
+   `SIM`. Do not reuse a live-looking Book ID for testing.
 3. Create **six distinct simulation accounts**. Six charts assigned to the same
    `Sim101` account are not six independent seats.
 4. Use one chart/strategy instance per account and assign Instance IDs `1`–`6`
@@ -53,11 +53,12 @@ Use the broker rule applicable to that account:
   cross-check it against the broker's high-water value. If the threshold has
   frozen, that formula may no longer reconstruct the historical peak; use the
   broker's authoritative high-water mark instead.
-- **End-of-day trailing account:** use the highest qualifying end-of-day closed
-  balance reported by the broker. Do not invent an intraday threshold. With
-  `Track peak on unrealized = true`, the router may subsequently ratchet to a
-  higher observed NetLiquidation peak, which is conservative only under the
-  broker-rule assumptions documented in `README.md`.
+- **End-of-day trailing account:** seed the statement's
+  `Auto Liquidate Peak Balance`, the same high-water field used by the generator.
+  The helper compares the resulting modelled floor with
+  `Auto Liquidate EOD Value` and refuses any row whose modelled floor would be
+  lower. This deliberately understates headroom under the assumptions documented
+  in `README.md`.
 - **Uncertain or conflicting value:** do not enable the book. Obtain the value
   from the broker and reconcile it first.
 
@@ -72,7 +73,7 @@ The recovered study uses `frozen_offset = 100`. Compare the calculated floor
 with the broker's displayed liquidation threshold/cushion. A mismatch is a stop
 condition; do not “correct” it by guessing a different peak.
 
-## 3a. Generate the peak file with make_peak_file.py
+## 3. Generate the peak file with make_peak_file.py
 
 Do not hand-derive peaks. `make_peak_file.py` builds the file, verifies every row
 against the broker's own numbers, and refuses to write anything that does not
@@ -85,7 +86,7 @@ reconcile. Run it from the `nt8` folder.
 | Live book, write locally | `python make_peak_file.py Broker_statement.csv --book LIVE` |
 | Live book, write into NinjaTrader | `python make_peak_file.py Broker_statement.csv --book LIVE --install` |
 | Simulation book | `python make_peak_file.py --seats sim --book SIM --install` |
-| Verify a live file is current | `python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv` |
+| Verify a live file matches a fresh statement | `python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv` |
 | Verify a simulation file | `python make_peak_file.py --seats sim --check peaks_SIM.csv` |
 | Non-standard NinjaTrader folder | add `--nt8-dir "D:\path\to\PropRouter"` |
 
@@ -94,8 +95,10 @@ the file from `--book`, so the Book ID is typed once instead of twice. Without i
 the file lands in the current directory and the script prints the exact
 destination to copy it to. `--install` and `--out` cannot be combined.
 
-`--check` exits `0` when the file is current and `1` when any seat is stale, so
-it can be wired into a pre-start check.
+`--check` exits `0` when the file strictly parses and matches the supplied
+statement/configuration, and `1` on a value mismatch. The helper cannot prove
+that the supplied statement itself is fresh; export it immediately before the
+check.
 
 ### Live book, from a broker statement
 
@@ -155,13 +158,20 @@ cover `1..N` with no gaps, which is what the router's quorum requires.
 
 The generated file is UTF-8 without BOM, LF endings, period decimals, exact
 header, five fields per row - the precise form the router's strict parser
-accepts. It never needs hand editing, and must never be written from Excel.
+accepts. Writes use a same-directory temporary file, flush to disk, replace the
+primary atomically, and preserve the previous primary as `.bak`.
+
+Existing lifecycle state is monotonic. The helper refuses a lower peak, changed
+account set, changed start balance, changed drawdown, or invalid installed file.
+Use `--allow-peak-reset` only after a documented account reset/replacement/tier
+change. For simulation accounts, resetting them in NinjaTrader is the required
+precondition before deliberately lowering their peaks with that override.
 
 Copy or install it with **every strategy stopped**: the router rewrites this file
 on every new equity high and will clobber an edit made while it is running.
 
 
-## 3b. When the peak file must be re-seeded
+### When the peak file must be re-seeded
 
 The peak file is **persistent**. It is not rebuilt per session: the router reads
 it once per book per NT8 process and rewrites it on every new equity high. A
@@ -194,9 +204,11 @@ Verification costs seconds. Export a fresh broker statement and run:
 python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
 ```
 
-Exit code `0` means the file is current and NT8 can start. Exit `1` lists the
-stale seats; re-run without `--check` to rewrite. Make this part of the
-start-of-day routine rather than something you remember to do after an incident.
+Exit code `0` means the file matches that freshly supplied statement and strict
+router schema. Exit `1` lists value mismatches. Re-run without `--check` to
+rewrite only after confirming no peak would decrease; an unexplained decrease
+is evidence of a stale statement, not permission to use `--allow-peak-reset`.
+Make this part of the start-of-day routine.
 
 Partial self-healing exists but cannot be relied on: on reconnect the router
 ratchets `peak` up to current equity, so a high that is *still* in place is
@@ -206,68 +218,6 @@ is lost, and only a fresh statement will reveal it.
 > **A replaced peak file needs a full NinjaTrader restart.** The load is latched
 > per book per process, so disabling and re-enabling the strategies will silently
 > keep using the old peaks. Close NT8 completely, replace the file, then start.
-
-## 3. Create the peak file manually
-
-Use this path for simulation books, or when no broker statement is available.
-
-With NinjaTrader fully closed, create this directory if it does not exist:
-
-```text
-Documents\NinjaTrader 8\PropRouter\
-```
-
-Create `peaks_<BookId>.csv`. For the example Book ID above, the exact path is:
-
-```text
-Documents\NinjaTrader 8\PropRouter\peaks_PLAYBACK_ROUTER_V2.csv
-```
-
-With Windows file-name extensions visible, confirm it ends in `.csv`, not
-`.csv.txt`.
-
-Use a plain-text editor and this exact five-column schema:
-
-```csv
-account,start_balance,drawdown,peak,updated_utc
-SIM-ROUTER-01,50000.00,2500.00,50000.00,2026-08-18T12:00:00Z
-SIM-ROUTER-02,50000.00,2500.00,50000.00,2026-08-18T12:00:00Z
-SIM-ROUTER-03,50000.00,2500.00,50000.00,2026-08-18T12:00:00Z
-SIM-ROUTER-04,50000.00,2500.00,50000.00,2026-08-18T12:00:00Z
-SIM-ROUTER-05,50000.00,2500.00,50000.00,2026-08-18T12:00:00Z
-SIM-ROUTER-06,50000.00,2500.00,50000.00,2026-08-18T12:00:00Z
-```
-
-Replace every example account and number with the actual simulation-account
-configuration. The start balance and drawdown in each row must exactly match that
-seat's strategy properties.
-
-The previously collected future-live reference values were:
-
-```csv
-account,start_balance,drawdown,peak,updated_utc
-PA-APEX-240737-09,25000.00,1500.00,28903.95,2026-08-19T00:00:00Z
-PA-APEX-240737-10,25000.00,1500.00,27870.23,2026-08-19T00:00:00Z
-PA-APEX-240737-12,50000.00,2000.00,51228.65,2026-08-19T00:00:00Z
-PA-APEX-240737-13,50000.00,2000.00,50480.45,2026-08-19T00:00:00Z
-PA-APEX-240737-14,50000.00,2000.00,50338.31,2026-08-19T00:00:00Z
-PA-APEX-240737-15,50000.00,2500.00,50844.85,2026-08-19T00:00:00Z
-```
-
-These are an audit reference, **not values to copy blindly**. Re-read fresh
-broker values immediately before any future cutover. In particular, a peak can
-only stay the same or rise during an account lifecycle unless the broker has
-performed a documented reset.
-
-CSV rules are strict:
-
-- Use periods for decimals, never decimal commas or thousands separators.
-- Keep exactly five comma-separated fields per data row and no blank rows.
-- Use UTC timestamps exactly as `yyyy-MM-ddTHH:mm:ssZ`.
-- Keep account names unique after removing any suffix beginning with `!`.
-- Save as plain UTF-8 text; do not round-trip the file through Excel.
-
-Make a separate, dated operator backup before starting NT8.
 
 ## 4. Start and verify before the first signal
 
@@ -296,16 +246,20 @@ Before any wider test, observe one complete controlled sequence:
 
 1. A valid red 30-minute candle routes exactly one one-contract buy stop-limit
    for `R=1`.
-2. While it is working, a newer valid red candle requests cancellation of the old
-   entry. No replacement is submitted until the old order reports `Cancelled`.
-3. After cancellation, exactly one replacement uses the newer candle's high,
-   low and R:R.
-4. Repeat with the old order filling during cancellation. Confirm the replacement
-   is discarded and the fill uses the old candle's low/R:R.
+2. While it is working, a newer valid red candle changes that same managed order
+   in place. Confirm there is no cancel/resubmit gap and no additional router
+   claim.
+3. Exercise a fill around the change callback. Confirm a fill at the old or new
+   entry price uses the setup belonging to that entry price, never an unrelated
+   recent candle.
+4. Form a gap-skipped red candle whose high has already been reached. Confirm it
+   neither changes the working order nor overwrites its stop/R:R. The older order
+   remains available to fill with its own valid setup.
 5. After a fill, confirm the original equal-price protective stop-limit is sent.
 6. Confirm an intrabar target touch with a close below target does nothing; a
    later 30-minute close at/above 1R submits the sell limit at close plus offset.
-7. Confirm the actual bar series performs the end-of-day cancel/flatten behavior.
+7. Confirm NinjaTrader's built-in session-close handling cancels/flattens at the
+   configured Trading Hours session end; there is no strategy-level 23:57 cutoff.
 
 Then complete every release-gate test in `README.md`.
 

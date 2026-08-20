@@ -438,12 +438,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ExitOnSessionCloseSeconds = 30;
                 StartBehavior = StartBehavior.ImmediatelySubmit;
                 IsUnmanaged = false;
-                // There is no complete custom rejection state machine here. NinjaTrader's
-                // fail-safe behavior is therefore mandatory: cancel working orders, close the
-                // strategy position and stop rather than continue after a rejected live order.
-                // Matches the original strategy. StopCancelClose would flatten a live position
-                // at market on any transient rejection - a zero-band protective stop-limit is
-                // exactly the order most likely to trigger that.
+                // Fidelity setting from the original strategy. There is no complete custom
+                // rejection state machine: errors are logged, but NinjaTrader does not
+                // automatically cancel/flatten/stop this strategy. StopCancelClose would change
+                // outcomes by flattening at market on a transient rejection.
                 RealtimeErrorHandling = RealtimeErrorHandling.IgnoreAllErrors;
                 InstanceId = 1;
                 UseCustomQuantity = false;

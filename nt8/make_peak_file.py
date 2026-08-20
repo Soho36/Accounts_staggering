@@ -33,9 +33,10 @@ reports the size of the gap.
 Usage:
     python make_peak_file.py Broker_statement.csv --book LIVE               ---> Live book, write locally
     python make_peak_file.py Broker_statement.csv --book LIVE --install     ---> Live book, write into NinjaTrader
-    python make_peak_file.py --seats sim --book SIM --install`              ---> Simulation book
-    python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv    ---> Verify a live file is current
+    python make_peak_file.py --seats sim --book SIM --install               ---> Simulation book
+    python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv    ---> Compare with a fresh statement
     python make_peak_file.py --seats sim --check peaks_SIM.csv              ---> Verify a simulation file
+    python make_peak_file.py ... --allow-peak-reset                         ---> Deliberate reset only
 """
 
 from __future__ import print_function
@@ -44,7 +45,9 @@ import argparse
 import csv
 import io
 import os
+import re
 import sys
+import tempfile
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -92,6 +95,7 @@ SEAT_CONFIGS = {"live": SEAT_CONFIG, "sim": SEAT_CONFIG_SIM}
 FROZEN_OFFSET = Decimal("100")
 HEADER = "account,start_balance,drawdown,peak,updated_utc"
 TOL = Decimal("0.005")          # half a cent
+BOOK_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 REQUIRED_COLUMNS = (
@@ -108,13 +112,36 @@ class SeedError(Exception):
     pass
 
 
+def normalize_account(name):
+    """Match PropRouter's account-key normalization."""
+    text = (name or "").strip()
+    return text.split("!", 1)[0].strip().lower()
+
+
+def validate_book_id(book):
+    if not book or not BOOK_RE.match(book):
+        raise SeedError("Book ID %r is invalid; use only letters, digits, '-' or '_'"
+                        % book)
+
+
 def validate_seat_config(cfg, label):
     """Catch config mistakes that would otherwise surface as unregisterable charts."""
     if not cfg:
         raise SeedError("SEAT_CONFIG for %r is empty" % label)
 
     instances = {}
+    normalized_accounts = {}
     for account, c in sorted(cfg.items()):
+        normalized = normalize_account(account)
+        if not normalized or any(ch in account for ch in (",", "\r", "\n")):
+            raise SeedError("%s seat account %r cannot be represented in the strict CSV schema"
+                            % (label, account))
+        if normalized in normalized_accounts:
+            raise SeedError(
+                "%s seats %s and %s collide after router account normalization"
+                % (label, normalized_accounts[normalized], account))
+        normalized_accounts[normalized] = account
+
         for key in ("instance", "start", "dd", "kind"):
             if key not in c:
                 raise SeedError("%s seat %s is missing %r" % (label, account, key))
@@ -126,7 +153,7 @@ def validate_seat_config(cfg, label):
             dd = Decimal(c["dd"])
         except InvalidOperation:
             raise SeedError("%s seat %s has a non-numeric start or dd" % (label, account))
-        if start <= 0 or dd <= 0:
+        if not start.is_finite() or not dd.is_finite() or start <= 0 or dd <= 0:
             raise SeedError("%s seat %s needs start and dd greater than zero" % (label, account))
 
         inst = c["instance"]
@@ -367,15 +394,146 @@ def build_untraded_seeds(seat_config):
     return seeds
 
 
-def write_peak_file(seeds, path, stamp):
+def read_peak_file(path):
+    """Parse the exact schema PropRouter accepts, including normalized duplicates."""
+    with io.open(path, "r", encoding="utf-8-sig", newline="") as fh:
+        text = fh.read().replace("\r\n", "\n")
+
+    lines = text.rstrip("\n").split("\n")
+    if not lines or lines[0] != HEADER:
+        raise SeedError("%s has a bad header; expected exactly '%s'" % (path, HEADER))
+    if len(lines) == 1:
+        raise SeedError("%s contains no peak rows" % path)
+
+    records = {}
+    for n, line in enumerate(lines[1:], start=2):
+        if not line.strip():
+            raise SeedError("%s row %d is blank" % (path, n))
+        f = line.split(",")
+        if len(f) != 5:
+            raise SeedError("%s row %d: expected exactly 5 fields, got %d"
+                            % (path, n, len(f)))
+
+        account = f[0].strip()
+        key = normalize_account(account)
+        if not key:
+            raise SeedError("%s row %d has an empty account" % (path, n))
+        if key in records:
+            raise SeedError("%s row %d duplicates normalized account %r"
+                            % (path, n, key))
+
+        try:
+            start = Decimal(f[1].strip())
+            dd = Decimal(f[2].strip())
+            peak = Decimal(f[3].strip())
+        except InvalidOperation:
+            raise SeedError("%s row %d has a non-numeric start, drawdown or peak"
+                            % (path, n))
+        if not start.is_finite() or not dd.is_finite() or not peak.is_finite():
+            raise SeedError("%s row %d contains a non-finite number" % (path, n))
+        if start <= 0 or dd <= 0 or peak <= 0 or peak < start:
+            raise SeedError("%s row %d requires positive start/drawdown/peak and peak >= start"
+                            % (path, n))
+
+        stamp = f[4].strip()
+        try:
+            datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            raise SeedError("%s row %d has invalid updated_utc %r; expected yyyy-MM-ddTHH:mm:ssZ"
+                            % (path, n, stamp))
+
+        records[key] = {
+            "account": account,
+            "start": start,
+            "dd": dd,
+            "peak": peak,
+            "updated_utc": stamp,
+        }
+    return records
+
+
+def validate_peak_transition(seeds, path, allow_peak_reset=False):
+    """Never let an ordinary helper run lower or replace trusted lifecycle state."""
+    if not os.path.exists(path):
+        return
+
+    try:
+        existing = read_peak_file(path)
+    except SeedError:
+        if allow_peak_reset:
+            return
+        raise
+
+    proposed = dict((normalize_account(s["account"]), s) for s in seeds)
+    if set(existing) != set(proposed) and not allow_peak_reset:
+        raise SeedError(
+            "%s account set differs from the proposed book. Refusing to replace lifecycle "
+            "state; use --allow-peak-reset only after a documented account reset/replacement."
+            % path)
+
+    for key in sorted(set(existing) & set(proposed)):
+        old = existing[key]
+        new = proposed[key]
+        if (old["start"] != new["start"] or old["dd"] != new["dd"]) \
+                and not allow_peak_reset:
+            raise SeedError(
+                "%s account %s changes start/drawdown from %s/%s to %s/%s. "
+                "Use --allow-peak-reset only after a documented account reset/tier change."
+                % (path, old["account"], old["start"], old["dd"],
+                   new["start"], new["dd"]))
+        if new["peak"] < old["peak"] and not allow_peak_reset:
+            raise SeedError(
+                "%s account %s would LOWER trusted peak from %s to %s. The supplied "
+                "statement may be stale. Re-export it, or use --allow-peak-reset only "
+                "after a documented broker/simulation account reset."
+                % (path, old["account"], old["peak"], new["peak"]))
+
+
+def atomic_replace_bytes(path, payload):
+    """Durably write in the destination directory, then atomically replace."""
+    directory = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(directory):
+        raise SeedError("output directory does not exist: %s" % directory)
+
+    fd, temporary = tempfile.mkstemp(prefix=".%s." % os.path.basename(path),
+                                     suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_replace_text(path, body):
+    atomic_replace_bytes(path, body.encode("utf-8"))
+
+
+def write_peak_file(seeds, path, stamp, allow_peak_reset=False):
     lines = [HEADER]
     for s in sorted(seeds, key=lambda x: x["account"]):
         lines.append("%s,%.2f,%.2f,%.2f,%s"
                      % (s["account"], s["start"], s["dd"], s["peak"], stamp))
     body = "\n".join(lines) + "\n"
-    # UTF-8 without BOM, period decimals, LF endings. Never write this from Excel.
-    with io.open(path, "w", encoding="utf-8", newline="") as fh:
-        fh.write(body)
+
+    validate_peak_transition(seeds, path, allow_peak_reset)
+
+    # Preserve the previous trusted primary before replacing it. On first creation,
+    # seed the backup with the same validated body so recovery is immediately possible.
+    if os.path.exists(path):
+        with io.open(path, "rb") as fh:
+            backup_payload = fh.read()
+    else:
+        backup_payload = body.encode("utf-8")
+
+    atomic_replace_bytes(path + ".bak", backup_payload)
+    atomic_replace_text(path, body)
     return body
 
 
@@ -409,40 +567,33 @@ def report(seeds):
 
 
 def check_existing(seeds, path):
-    """Compare a previously written peak file against freshly derived seeds."""
+    """Strictly parse a peak file, then compare it with the supplied source data."""
     if not os.path.exists(path):
         raise SeedError("%s does not exist" % path)
-    with io.open(path, "r", encoding="utf-8-sig", newline="") as fh:
-        lines = fh.read().replace("\r\n", "\n").rstrip("\n").split("\n")
-    if not lines or lines[0] != HEADER:
-        raise SeedError("%s has a bad header; expected exactly '%s'" % (path, HEADER))
-
-    on_disk = {}
-    for n, line in enumerate(lines[1:], start=2):
-        f = line.split(",")
-        if len(f) != 5:
-            raise SeedError("%s row %d: expected exactly 5 fields, got %d"
-                            % (path, n, len(f)))
-        on_disk[f[0].strip()] = f
+    on_disk = read_peak_file(path)
 
     ok = True
     for s in sorted(seeds, key=lambda x: x["account"]):
-        f = on_disk.get(s["account"])
-        if f is None:
+        key = normalize_account(s["account"])
+        record = on_disk.get(key)
+        if record is None:
             print("  MISSING  %s is not in the file" % s["account"])
             ok = False
             continue
-        want = ("%.2f" % s["start"], "%.2f" % s["dd"], "%.2f" % s["peak"])
-        got = (f[1].strip(), f[2].strip(), f[3].strip())
+        want = (s["start"], s["dd"], s["peak"])
+        got = (record["start"], record["dd"], record["peak"])
         if want != got:
             print("  STALE    %s file start/dd/peak=%s, statement implies %s"
-                  % (s["account"], "/".join(got), "/".join(want)))
+                  % (s["account"], "/".join(str(x) for x in got),
+                     "/".join(str(x) for x in want)))
             ok = False
         else:
             print("  ok       %s" % s["account"])
 
-    for name in sorted(set(on_disk) - set(s["account"] for s in seeds)):
-        print("  EXTRA    %s is in the file but not in the statement" % name)
+    expected = set(normalize_account(s["account"]) for s in seeds)
+    for key in sorted(set(on_disk) - expected):
+        print("  EXTRA    %s is in the file but not in the supplied source"
+              % on_disk[key]["account"])
         ok = False
     return ok
 
@@ -464,12 +615,20 @@ def main(argv=None):
                          "naming the file from --book so the Book ID is never retyped")
     ap.add_argument("--nt8-dir", default=None, dest="nt8_dir",
                     help="override the NinjaTrader PropRouter directory used by --install")
+    ap.add_argument("--allow-peak-reset", action="store_true",
+                    help="DANGEROUS: permit lower peaks, changed account sets, changed tiers, "
+                         "or replacement of an invalid existing file after a documented "
+                         "broker/simulation account reset")
     args = ap.parse_args(argv)
 
     seat_config = SEAT_CONFIGS[args.seats]
 
     try:
+        validate_book_id(args.book)
         validate_seat_config(seat_config, args.seats)
+
+        if args.check and args.allow_peak_reset:
+            raise SeedError("--allow-peak-reset is a write-only override and cannot be used with --check")
 
         if args.statement and args.seats == "sim":
             raise SeedError(chr(10).join([
@@ -523,8 +682,8 @@ def main(argv=None):
             print("ERROR: %s" % exc, file=sys.stderr)
             return 2
         print("")
-        print("Peak file is current."
-              if ok else "Peak file is STALE - re-run without --check to rewrite.")
+        print("Peak file matches the supplied source and strict router schema."
+              if ok else "Peak file DOES NOT MATCH the supplied source.")
         return 0 if ok else 1
 
     if args.install and args.out:
@@ -547,11 +706,21 @@ def main(argv=None):
     else:
         out = args.out or ("peaks_%s.csv" % args.book)
 
+    print("")
+    print("PRE-WRITE CHECK: NinjaTrader and every strategy using this book must be stopped.")
+    print("The helper will refuse a lower peak or changed lifecycle unless the explicit")
+    print("--allow-peak-reset override was supplied after a documented account reset.")
+
     stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    body = write_peak_file(seeds, out, stamp)
+    try:
+        body = write_peak_file(seeds, out, stamp, args.allow_peak_reset)
+    except (SeedError, OSError) as exc:
+        print("ERROR: peak file was not replaced: %s" % exc, file=sys.stderr)
+        return 2
 
     print("")
     print("Wrote %s" % os.path.abspath(out))
+    print("Backup %s" % os.path.abspath(out + ".bak"))
     print("")
     for line in body.rstrip("\n").split("\n"):
         print("  " + line)
@@ -568,7 +737,7 @@ def main(argv=None):
         print("  1. The file is already in place. Every strategy in book %r must have"
               % args.book)
         print("     been stopped when this ran - the router rewrites the file on every")
-        print("     new equity high and would have clobbered it.")
+        print("     new equity high and could otherwise race this replacement.")
         print("  2. Fully restart NinjaTrader. Disabling and re-enabling a strategy does")
         print("     NOT reload the peak file; the load is latched per book per process.")
         print("  3. Start the strategies; each should print 'peak seeded at ...'.")

@@ -52,6 +52,12 @@ revalidation, transient peak capture, ownership/leases and fail-closed invalid
 state. It does **not** emulate NinjaTrader's managed-order engine; the Playback
 checklist remains mandatory for the strategy and broker lifecycle.
 
+`signal_router.py` intentionally remains a completed-trade allocation model. It
+does not simulate red-candle order placement, pending stop orders, re-pricing,
+broker rejection or missed fills, and this project does not propose adding those
+mechanics to it. NinjaTrader owns that order lifecycle; fidelity there is checked
+against the original strategy and exported fills in Playback.
+
 ## Model and exposure
 
 The core max-headroom ranking is:
@@ -181,7 +187,7 @@ Common settings for all six Playback instances:
 |---|---|
 | Account | one distinct simulation account per seat |
 | Routing Mode | `Routed` for allocation tests |
-| Book ID | a simulation-only ID, for example `PLAYBACK_ROUTER_V2` |
+| Book ID | a simulation-only ID, `SIM` in the commands below |
 | R — copies per signal | `1` |
 | Expected seats in book | `6` |
 | Entry quantity | exactly `1` contract |
@@ -223,36 +229,36 @@ The Trading Hours template controls the session and which bars exist. It is part
 of the manifest. The global time zone is not in the manifest, so it remains a
 manual release check.
 
-The explicit end-of-day branch runs only on an OnBarClose callback whose
-timestamp is at or after 23:57 and still before midnight. Once reached, it
-requests flatten/cancel and blocks later entries that date. A series with no
-23:57–23:59 bar can still miss that explicit branch; the built-in session-close
-exit is a separate backstop. Test the actual BarsPeriod, Trading Hours template
-and global time zone in Playback.
+There is no strategy-level 23:57 cutoff. End-of-session flattening and order
+cancellation are delegated to NinjaTrader's built-in
+`IsExitOnSessionCloseStrategy` handling, 30 seconds before the Trading Hours
+template's session end. Test the exact BarsPeriod, template and global time zone
+in Playback; this is intentionally a minor difference from the checked-in
+original script.
 
 The following core order semantics are intentional and match the original
 strategy design:
 
 1. A valid red candle submits a buy stop-limit at that candle's high. Its low and
-   the active hour's R:R stay attached to that order setup.
-2. If another valid red candle closes before entry, the strategy requests
-   cancellation of the old order. It submits the newest red-candle order only
-   after the broker reports the old order `Cancelled`.
-3. If the old order fills before cancellation is confirmed, the queued
-   replacement is discarded. That fill keeps the old candle's stop and R:R; it
-   can never inherit the newer candle's risk values.
-4. After entry, the loss exit remains the original sell stop-limit with equal
+   the active hour's R:R define that setup.
+2. If another valid red candle closes while the entry is working, the managed
+   API re-prices that same order **in place** using the same signal name. There is
+   no cancel/resubmit gap and no additional router claim.
+3. A gap-skipped red candle does not overwrite the working order's accepted
+   setup. This intentionally fixes an original-script defect: attaching the
+   skipped candle's higher low to an older fill could produce a stop above entry
+   and negative risk. It changes only this defective rare-path trade management,
+   not whether the old order remains available to fill.
+4. On a fill/re-price race, the strategy first matches the fill price to the
+   recorded candle entry price. It never selects an arbitrary recent candle. If
+   no valid setup can be identified, it exits at market rather than inventing a
+   stop/R:R pair.
+5. After entry, the loss exit remains the original sell stop-limit with equal
    stop and limit at the signal candle's low.
-5. The take-profit remains bar-close-driven. It is **not** a resting target
+6. The take-profit remains bar-close-driven. It is **not** a resting target
    placed at entry. Only after a completed bar closes at or above the target does
    the strategy submit a sell limit at `Close + ExitOffset`. An intrabar target
    touch followed by a close below target does nothing.
-
-Cancel acknowledgement creates a real broker-time gap. If price reaches or
-passes the queued replacement stop before the old cancellation is confirmed,
-the replacement is skipped rather than submitting an already-triggered stop.
-This preserves order/risk ownership; test both the cancel-first and fill-first
-races in Playback.
 
 ## Routing modes — none is a dry run
 
@@ -310,7 +316,7 @@ Current equity is never allowed to bootstrap a trusted peak.
 ### Generating the file
 
 Never hand-derive a peak. Use `make_peak_file.py`; the full procedure, every
-flag and the failure modes are in [FIRST_START.md](FIRST_START.md) section 3a.
+flag and the failure modes are in [FIRST_START.md](FIRST_START.md) section 3.
 
 ```bash
 # live book, from a broker statement, written into NinjaTrader
@@ -319,13 +325,29 @@ python make_peak_file.py Broker_statement.csv --book LIVE --install
 # simulation book, no statement needed (untraded accounts only)
 python make_peak_file.py --seats sim --book SIM --install
 
-# verify an existing file before starting NinjaTrader (exit 0 current, 1 stale)
+# verify an existing file against a freshly exported statement (0 match, 1 mismatch)
 python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
 ```
 
 The seed is the broker's `Auto Liquidate Peak Balance`, used unmodified. The
 script verifies every row against the broker's own floor and writes nothing if
 any row disagrees.
+
+Ordinary writes are monotonic: an existing peak may stay equal or rise, but may
+not fall. Account-set, start-balance and drawdown changes are also refused. Only
+a documented broker/simulation reset may use the explicit
+`--allow-peak-reset` override. Writes use a same-directory temporary file,
+write-through flush, atomic replacement and a `.bak` containing the previous
+primary.
+
+`--check` strictly validates the same header, five fields, numeric values,
+normalized-account uniqueness and UTC timestamp format as the router. Exit `0`
+means “matches the supplied statement/configuration”; the helper cannot prove
+that the supplied statement itself is fresh.
+
+Peak files are mutable operational account state, not source fixtures. The
+repository ignores new `nt8/peaks_*.csv` files; keep live copies and their
+financial values outside version control.
 
 Snapshot of the live book at the time of writing - the script is the source of
 truth, these values drift with every trade:
@@ -513,11 +535,12 @@ Output text separately when testing that mode.
   unchanged from the original rules, but the limit submitted at close plus
   offset is not guaranteed to fill. There is no independent accepted/working
   acknowledgement timeout.
-- **Cancel/replace depends on broker acknowledgement.** A newer valid red candle
-  cancels the prior working entry and replaces it only after confirmed
-  `Cancelled`. If the old order fills first, the replacement is discarded. If
-  price is already at/above the new stop after cancellation, the replacement is
-  skipped. Both races require provider-specific Playback testing.
+- **In-place re-pricing retains a broker race.** A newer valid red candle changes
+  the managed working order with no cancel/resubmit gap. A fill can interleave
+  with that change. The strategy associates the fill with a recorded setup by
+  entry price, falls back only to a self-consistent order binding, and exits at
+  market when it cannot identify a valid setup. Provider-specific Playback
+  testing remains mandatory.
 - **No open-position/order adoption.** Startup deliberately refuses an existing
   account position or this instance's non-terminal orders. It cannot recover
   their original stop/R:R state.
@@ -555,10 +578,15 @@ Output text separately when testing that mode.
   in-session disarming are deliberate fidelity choices. A rejected protective
   stop leaves an unprotected position and the strategy keeps running; only the
   emergency market exit and the built-in session close will act.
-- **Entry re-pricing carries the original's race.** A new red candle re-prices
-  the working order in place. If the old price fills before the modification
-  lands, that fill is protected with the newer candle's stop. This is the
-  original behaviour, retained deliberately so fills match the measured system.
+- **Gap-skipped candles deliberately fix an original defect.** The skipped
+  candle does not replace the working setup's stop/R:R. The original could attach
+  a higher low to an older fill, producing negative risk and an invalid stop.
+  This rare-path management fix does not remove the older order or change its
+  opportunity to fill.
+- **Unbacked Pending reconciliation is bar-driven.** A Pending seat with a flat
+  account and no strategy order is released only after broker-state checks and a
+  30-second grace period. The check currently runs from `OnBarUpdate`; on a
+  30-minute series, actual recovery can take approximately 30–60 minutes.
 
 ## Playback release-gate checklist
 
@@ -618,13 +646,17 @@ detail must show the expected fail-closed cause.
 - [ ] **Pending reservation:** leave one entry working and generate another
   signal. Confirm it consumes the `R=1` pending quota and no second entry is
   allocated.
-- [ ] **Cancel-first replacement:** leave red-candle A's entry working, then close
-  a valid red candle B. Confirm A receives a cancel request, no B order is sent
-  before A is terminal, and exactly one B buy stop-limit appears after A reports
-  `Cancelled`, using B's high, low and R:R.
-- [ ] **Fill-first replacement race:** fill A while its cancellation is pending.
-  Confirm B is discarded and A's protective stop and target calculation use A's
-  low and R:R—not B's.
+- [ ] **In-place re-pricing:** leave red-candle A's entry working, then close a
+  valid red candle B. Confirm the same managed entry is changed in place with no
+  cancel/resubmit gap and no additional router claim.
+- [ ] **Re-price/fill race:** exercise fills at A's and B's entry prices around
+  the change callback. Confirm the selected stop and R:R come from the candle
+  whose entry price filled; an unidentifiable setup must cause the documented
+  emergency exit, never an arbitrary recent-candle fallback.
+- [ ] **Gap-skipped candle:** while A is working, form a red candle whose entry is
+  already reached (`ask >= high`). Confirm no change request is sent, A remains
+  working, and an eventual A fill keeps a valid A setup rather than the skipped
+  candle's higher low.
 - [ ] **Overlap:** fill a seat, keep it in position, then generate a new signal.
   Confirm that seat is excluded and another free seat may receive the new copy.
 - [ ] **Headroom filter:** with stop coverage enabled, test one seat below and one
@@ -636,9 +668,9 @@ detail must show the expected fail-closed cause.
 - [ ] **Order rejection:** induce an entry/exit rejection in the simulator.
   Confirm the strategy logs the error, keeps running, and still takes new
   entries. Confirm no position is auto-flattened.
-- [ ] **Re-pricing:** with an unfilled entry working, produce a later red candle.
-  Confirm the working order is modified in place with no cancel/resubmit gap, and
-  that re-pricing consumes no additional router claim.
+- [ ] **Unbacked Pending:** force the entry API to return null or throw without a
+  live broker order. Confirm broker/account checks keep the seat Pending during
+  the grace period and eventually restore it to Free on later bar callbacks.
 - [ ] **Stop gap:** gap Playback through the equal stop/limit price. Confirm and
   document whether the stop remains unfilled. Live release remains blocked until
   this failure mode has a tested mitigation.
