@@ -578,9 +578,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 					caller.StatusAsOf = DateTime.UtcNow;
 					caller.LeaseHeartbeatAsOf = caller.StatusAsOf;
 				}
+				string myHeadroom = caller.HasEquity
+					? caller.Headroom.ToString("F2", CultureInfo.InvariantCulture) : "n/a";
+
 				reason = granted
-					? string.Format(CultureInfo.InvariantCulture, "selected; winners=[{0}]", string.Join(",", decision.Winners))
-					: string.Format(CultureInfo.InvariantCulture, "not selected; winners=[{0}]",
+					? string.Format(CultureInfo.InvariantCulture,
+						"selected; headroom={0}; winners=[{1}]; book {2}",
+						myHeadroom, string.Join(",", decision.Winners), RankingSnapshot(b))
+					: string.Format(CultureInfo.InvariantCulture,
+						"not selected; headroom={0}; winners=[{1}]",
+						myHeadroom,
 						decision.Winners.Count == 0 ? "none" : string.Join(",", decision.Winners));
 				return granted;
 			}
@@ -1141,6 +1148,20 @@ namespace NinjaTrader.NinjaScript.AddOns
 				File.AppendAllText(path, sb.ToString());
 			}
 			catch { /* logging must never interrupt trading */ }
+		}
+
+		/// <summary>Compact "instance=headroom" ranking, in the order max_headroom would pick.</summary>
+		private static string RankingSnapshot(PropBook b)
+		{
+			return string.Join(" ", b.Seats.Values
+				.Where(s => s.HasEquity)
+				.OrderByDescending(s => s.Headroom)
+				.ThenBy(s => s.TradesTaken)
+				.ThenBy(s => s.InstanceId)
+				.Select(s => string.Format(CultureInfo.InvariantCulture,
+					"{0}:{1:F2}{2}", s.InstanceId, s.Headroom,
+					s.Status == SeatStatus.Free ? string.Empty : "(" + s.Status + ")"))
+				.ToArray());
 		}
 
 		private static string CsvField(string value)

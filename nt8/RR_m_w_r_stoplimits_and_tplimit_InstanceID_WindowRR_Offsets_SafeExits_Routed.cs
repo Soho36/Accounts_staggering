@@ -70,6 +70,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private readonly Dictionary<string, EntrySetup> entrySetupsById =
             new Dictionary<string, EntrySetup>(StringComparer.Ordinal);
         private EntrySetup submittingEntrySetup;
+        private readonly List<EntrySetup> recentEntrySetups = new List<EntrySetup>();
         private readonly object exitOrdersSync = new object();
         private readonly List<Order> stopOrders = new List<Order>();
         private readonly List<Order> takeProfitOrders = new List<Order>();
@@ -1038,7 +1039,55 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void BeginEntrySetupSubmission(EntrySetup setup)
         {
             lock (entrySetupsSync)
+            {
                 submittingEntrySetup = setup;
+                if (setup != null)
+                {
+                    recentEntrySetups.Add(setup);
+                    while (recentEntrySetups.Count > 8)
+                        recentEntrySetups.RemoveAt(0);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Picks the setup that actually belongs to this fill. Normally the bound one, but
+        /// if its stop is not below the fill price the binding is stale - a re-price whose
+        /// modification the broker never applied - so fall back to the recent candle whose
+        /// entry price the fill matches. Only if nothing usable is found does the caller
+        /// resort to the emergency market exit.
+        /// </summary>
+        private EntrySetup ResolveSetupForFill(Execution execution, string orderId, double fillPrice)
+        {
+            EntrySetup bound = ResolveExecutionSetup(execution, orderId);
+            if (bound != null && bound.StopPrice < fillPrice)
+                return bound;
+
+            double halfTick = TickSize / 2.0;
+            lock (entrySetupsSync)
+            {
+                for (int i = recentEntrySetups.Count - 1; i >= 0; i--)
+                {
+                    EntrySetup s = recentEntrySetups[i];
+                    if (s.StopPrice < fillPrice && Math.Abs(s.EntryPrice - fillPrice) < halfTick)
+                    {
+                        Print($"[{EntrySignalName}] ⚠️ bound setup was stale for a fill at {fillPrice}; " +
+                              $"recovered the {s.SignalTime} candle (stop {s.StopPrice}, R:R {s.RiskReward})");
+                        return s;
+                    }
+                }
+                for (int i = recentEntrySetups.Count - 1; i >= 0; i--)
+                {
+                    EntrySetup s = recentEntrySetups[i];
+                    if (s.StopPrice < fillPrice)
+                    {
+                        Print($"[{EntrySignalName}] ⚠️ bound setup was stale for a fill at {fillPrice}; " +
+                              $"falling back to the {s.SignalTime} candle (stop {s.StopPrice})");
+                        return s;
+                    }
+                }
+            }
+            return bound;
         }
 
         private void EndEntrySetupSubmission(EntrySetup setup)
@@ -1057,13 +1106,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             lock (entrySetupsSync)
             {
-                EntrySetup setup;
-                if (!entrySetupsByOrder.TryGetValue(order, out setup)
+                // An explicit setup ALWAYS wins. The managed API re-prices the same order
+                // in place, so a later red candle replaces the entry price - and its stop
+                // and R:R must replace the old ones with it. Keeping the first binding
+                // (correct under the old cancel-and-resubmit design) would protect a fill
+                // at the NEW price with the OLD candle's stop.
+                EntrySetup setup = explicitSetup;
+
+                if (setup == null
+                    && !entrySetupsByOrder.TryGetValue(order, out setup)
                     && !string.IsNullOrWhiteSpace(order.OrderId))
                     entrySetupsById.TryGetValue(order.OrderId, out setup);
 
                 if (setup == null)
-                    setup = explicitSetup ?? submittingEntrySetup;
+                    setup = submittingEntrySetup;
 
                 if (setup != null)
                 {
@@ -1342,7 +1398,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // The entry order is re-priced in place, so the setup bound to this order id
                 // is the one that actually filled. Falls back to the pending fields if the
                 // binding is missing.
-                EntrySetup fillSetup = ResolveExecutionSetup(execution, orderId);
+                EntrySetup fillSetup = ResolveSetupForFill(execution, orderId, price);
                 double fillStopPrice = fillSetup == null ? pendingStopPrice : fillSetup.StopPrice;
                 double fillRiskReward = fillSetup == null ? pendingRiskReward : fillSetup.RiskReward;
                 pendingStopPrice = fillStopPrice;
