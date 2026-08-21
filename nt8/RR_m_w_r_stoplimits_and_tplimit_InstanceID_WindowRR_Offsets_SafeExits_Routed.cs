@@ -619,11 +619,29 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (routerRegistered)
             {
                 PublishStatus();
+
+                bool holdsExposure;
+                lock (routerStatusSync)
+                    holdsExposure = routerSeatStatus != SeatStatus.Free;
+
                 string reason;
-                if (!PropRouter.Unregister(BookId, InstanceId, routerLease, out reason))
-                    ReportRouterFailure("unregister", reason);
-                else
+                if (PropRouter.Unregister(BookId, InstanceId, routerLease, out reason))
+                {
                     Print($"[{EntrySignalName}] router lease released — {reason}");
+                }
+                else if (holdsExposure)
+                {
+                    // Not a malfunction: the seat still holds a position or a working order,
+                    // so the reservation is deliberately retained rather than handed away.
+                    Print($"[{EntrySignalName}] ⚠️ seat retained on shutdown — {reason}.");
+                    Print($"[{EntrySignalName}] ⚠️ This account still has broker exposure. Flatten it " +
+                          "and cancel its orders before restarting, or the startup preflight will " +
+                          "refuse this seat and the book will never reach quorum.");
+                }
+                else
+                {
+                    ReportRouterFailure("unregister", reason);
+                }
                 routerRegistered = false;
                 routerLease = Guid.Empty;
             }
