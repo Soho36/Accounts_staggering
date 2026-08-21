@@ -6,3 +6,5 @@
 /nt8/Broker_statement.csv
 /nt8/peaks_*.csv
 /nt8/Broker_statement_SIM.csv
+nt8/__pycache__/
+/nt8/session_SIM_202608201.html

@@ -114,6 +114,17 @@ The full per-seat record — equity, peak, floor, headroom, frozen, seeded,
 trades — is written to `PropRouter\routing_<BOOK>_<yyyymmdd>.csv`, one row per
 seat per decision. That file, not the Output window, is the thing to analyse.
 
+Render it rather than reading the CSV by hand:
+
+```bash
+python routing_report.py ".../PropRouter/routing_SIM_20260820.csv"
+```
+
+That writes one self-contained HTML file: headroom per seat across the session
+with routed decisions marked, an equity-against-floor panel per seat that makes
+the ratchet visible, the full decision table, and a seat summary carrying the
+identity `change in headroom = change in equity - change in floor`.
+
 ## Things that look like bugs and are not
 
 | Observation | Why it is correct |

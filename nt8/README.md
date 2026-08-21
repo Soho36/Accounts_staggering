@@ -21,6 +21,7 @@ especially before creating or editing a peak file.
 | `FIRST_START.md` | operator checklist; read before creating the book or peak file |
 | `ROUTER_LOGIC.md` | how allocation decisions are made; read before judging a log |
 | `make_peak_file.py` | builds/verifies `peaks_<BOOK>.csv` from a broker statement; run locally, not in NinjaTrader |
+| `routing_report.py` | renders `routing_<BOOK>_<date>.csv` as a self-contained HTML session report; run locally, not in NinjaTrader |
 | `tests\*` | local regression harness only; do not copy into NinjaTrader |
 
 The routed strategy is derived from

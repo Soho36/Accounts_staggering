@@ -608,6 +608,9 @@ def main(argv=None):
     ap.add_argument("--book", default="LIVE", help="Book ID (default: LIVE)")
     ap.add_argument("--out", default=None,
                     help="output path (default: peaks_<BOOK>.csv)")
+    ap.add_argument("--report", metavar="ROUTINGCSV", default=None,
+                    help="render a PropRouter routing log as a self-contained HTML "
+                         "session report instead of touching any peak file")
     ap.add_argument("--check", metavar="PEAKFILE", default=None,
                     help="verify an existing peak file instead of writing one")
     ap.add_argument("--install", action="store_true",
@@ -620,6 +623,24 @@ def main(argv=None):
                          "or replacement of an invalid existing file after a documented "
                          "broker/simulation account reset")
     args = ap.parse_args(argv)
+
+    if args.report:
+        # Read-only: renders a routing log. Never reads or writes a peak file.
+        try:
+            from routing_report import render, ReportError
+        except ImportError:
+            print("ERROR: routing_report.py must sit next to this script",
+                  file=sys.stderr)
+            return 2
+        try:
+            out, decisions, seat_ids = render(args.report, args.out)
+        except ReportError as exc:
+            print("ERROR: %s" % exc, file=sys.stderr)
+            return 2
+        print("Read %d decisions across %d seats from %s"
+              % (len(decisions), len(seat_ids), args.report))
+        print("Wrote %s" % os.path.abspath(out))
+        return 0
 
     seat_config = SEAT_CONFIGS[args.seats]
 
