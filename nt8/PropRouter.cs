@@ -1164,6 +1164,61 @@ namespace NinjaTrader.NinjaScript.AddOns
 				.ToArray());
 		}
 
+		/// <summary>
+		/// Durably records an order that blocked a seat's startup, so its id survives the
+		/// Output window. Without this the id exists only in a volatile log line, and losing
+		/// it leaves deleting NinjaTrader's database as the only way forward - which would
+		/// destroy the order and trade history for every account.
+		///
+		/// Deliberately lease-free: the preflight runs before registration.
+		/// </summary>
+		public static string RecordBlockedOrder(string book, int instanceId, string accountName,
+			string orderName, string orderId, string state, double quantity, double filled,
+			DateTime orderTime)
+		{
+			lock (sync)
+			{
+				string path = string.Empty;
+				try
+				{
+					Directory.CreateDirectory(StateDir);
+					path = Path.Combine(StateDir, "blocked_orders_" + Sanitize(book) + ".csv");
+
+					string key = ((accountName ?? "") + "|" + (orderId ?? "")).ToLowerInvariant();
+
+					if (File.Exists(path))
+					{
+						foreach (string line in File.ReadAllLines(path).Skip(1))
+						{
+							string[] f = line.Split(',');
+							if (f.Length >= 5
+								&& string.Equals((f[3] + "|" + f[4]).Trim().ToLowerInvariant(), key,
+									StringComparison.Ordinal))
+								return path;        // already recorded; keep one row per order
+						}
+					}
+					else
+					{
+						File.AppendAllText(path,
+							"first_seen_utc,book,instance,account,order_id,order_name,state,quantity,filled,order_time"
+							+ Environment.NewLine);
+					}
+
+					File.AppendAllText(path, string.Format(CultureInfo.InvariantCulture,
+						"{0:yyyy-MM-ddTHH:mm:ssZ},{1},{2},{3},{4},{5},{6},{7:F0},{8:F0},{9:yyyy-MM-dd HH:mm:ss}{10}",
+						DateTime.UtcNow, CsvField(book), instanceId, CsvField(accountName),
+						CsvField(orderId), CsvField(orderName), CsvField(state),
+						quantity, filled, orderTime, Environment.NewLine));
+
+					return path;
+				}
+				catch
+				{
+					return path;    // never let a disk problem change the interlock decision
+				}
+			}
+		}
+
 		private static string CsvField(string value)
 		{
 			string text = value ?? string.Empty;

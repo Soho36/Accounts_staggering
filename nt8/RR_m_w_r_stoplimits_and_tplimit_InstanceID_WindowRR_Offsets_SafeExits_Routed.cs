@@ -796,9 +796,20 @@ namespace NinjaTrader.NinjaScript.Strategies
                             continue;
                         }
 
+                        // Persist the id BEFORE returning. The Output window is volatile, and
+                        // without the id the only remaining option would be deleting
+                        // NinjaTrader's database - which destroys all order and trade history.
+                        string recordPath = PropRouter.RecordBlockedOrder(
+                            BookId, InstanceId, Account.Name, order.Name, OrphanKey(order),
+                            order.OrderState.ToString(), order.Quantity, order.Filled, order.Time);
+
                         reason = $"existing non-terminal order '{order.Name}' ({order.OrderState}) " +
                                  $"id={OrphanKey(order)} qty {order.Quantity} filled {order.Filled} " +
                                  $"from {order.Time}; restart/adoption is not implemented";
+
+                        if (!string.IsNullOrEmpty(recordPath))
+                            reason += $". This id is saved in {recordPath}, so it survives the " +
+                                      "Output window";
 
                         if (ambiguous)
                             reason += ". State Unknown usually means NinjaTrader could not reconcile a record " +

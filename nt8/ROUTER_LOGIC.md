@@ -212,10 +212,23 @@ nothing to do with peaks:
 **One blocked seat stops the entire book.** The other five register and seed
 normally, but quorum needs all six, so nothing trades anywhere.
 
+The id is **saved automatically** the moment the interlock fires, to
+
+```
+Documents\NinjaTrader 8\PropRouter\blocked_orders_<BOOK>.csv
+```
+
+one row per order, so losing the Output window does not lose the id. The
+interlock message names that path too. Without it the only remaining route would
+be deleting `db\NinjaTrader.sqlite`, which rebuilds NinjaTrader's database and
+destroys the order, execution and trade history for every account - never do that
+to recover one stale record.
+
 To clear it:
 
 1. Confirm at the broker that no such order is live and the account is flat.
-2. Copy the `id=` value out of the interlock message.
+2. Take the `id=` value from the interlock message, or from
+   `blocked_orders_<BOOK>.csv` if the window is gone.
 3. Paste it into **`Acknowledged orphan order IDs`** on that one chart. Several
    ids are separated with `;`.
 4. Re-enable the strategy. It prints `ACKNOWLEDGED ORPHAN` naming that id, and
