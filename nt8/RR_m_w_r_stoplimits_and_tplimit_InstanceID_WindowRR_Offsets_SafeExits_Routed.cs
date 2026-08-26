@@ -175,6 +175,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                  Description = "Optional safety: skip any seat whose headroom is smaller than this trade's initial stop risk. Off matches the study exactly.")]
         public bool RequireHeadroomCoversStop { get; set; }
 
+        [NinjaScriptProperty]
+        [Display(Name = "Acknowledged orphan order IDs", Order = 9, GroupName = "Signal Routing",
+                 Description = "Normally empty. To clear a startup block caused by an order stuck in state " +
+                               "Unknown, confirm at the broker that it is not live, then paste the id the " +
+                               "interlock message prints. Separate several with ';'. This names ONE dead " +
+                               "order, so a future orphan still blocks correctly - leave it set rather than " +
+                               "clearing it after the seat starts.")]
+        public string AcknowledgeOrphanOrderIds { get; set; }
+
         // ===== RISK/REWARD BY TIME WINDOW =====
         [NinjaScriptProperty]
         [Range(0.0, double.MaxValue)]
@@ -461,6 +470,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 SeatFrozenOffset = 100;
                 UseUnrealizedEquity = true;
                 RequireHeadroomCoversStop = false;
+                AcknowledgeOrphanOrderIds = string.Empty;
 
                 RR00 = RR01 = RR02 = RR03 = RR04 = RR05 = 0.0;
                 RR06 = RR07 = RR08 = RR09 = RR10 = RR11 = 0.0;
@@ -565,8 +575,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 startupInterlocked = true;
                 Print($"[{EntrySignalName}] ⛔ STARTUP INTERLOCK — {preflightReason}");
-                Print($"[{EntrySignalName}] ⛔ No new entries are permitted in ANY routing mode. " +
-                      "Resolve the account/order/configuration state, then disable and re-enable the strategy.");
+                Print($"[{EntrySignalName}] ⛔ No new entries are permitted in ANY routing mode on this chart.");
+                if (RoutingMode == PropRouterMode.Routed)
+                    Print($"[{EntrySignalName}] ⛔ This seat will NOT register, so book '{BookId}' cannot reach " +
+                          $"its quorum of {ExpectedSeats} seats. Every other seat will register and seed " +
+                          "normally but NO seat in the book will trade until this one is resolved. " +
+                          "Re-seeding the peak file does not help - this is an order-state problem.");
                 return;
             }
 
@@ -754,6 +768,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             try
             {
+                List<string> usedAcks = new List<string>();
+
                 lock (Account.Orders)
                 {
                     foreach (Order order in Account.Orders)
@@ -763,14 +779,42 @@ namespace NinjaTrader.NinjaScript.Strategies
                         if (!string.Equals(order.Instrument.FullName, Instrument.FullName,
                                 StringComparison.OrdinalIgnoreCase))
                             continue;
-                        if (IsOurSignalName(order.Name) && IsActiveOrder(order))
+                        if (!IsOurSignalName(order.Name) || !IsActiveOrder(order))
+                            continue;
+
+                        bool ambiguous = IsAmbiguousOrderState(order.OrderState);
+                        bool flat = PositionAccount == null
+                            || PositionAccount.MarketPosition == MarketPosition.Flat;
+
+                        if (ambiguous && flat && IsOrphanAcknowledged(order))
                         {
-                            reason = $"existing non-terminal order '{order.Name}' ({order.OrderState}) was found; " +
-                                     "restart/adoption is not implemented";
-                            return false;
+                            usedAcks.Add(OrphanKey(order));
+                            Print($"[{EntrySignalName}] ACKNOWLEDGED ORPHAN - ignoring '{order.Name}' " +
+                                  $"id={OrphanKey(order)} state={order.OrderState} qty={order.Quantity} " +
+                                  $"filled={order.Filled} from {order.Time}. You have asserted this specific " +
+                                  "order is not live at the broker.");
+                            continue;
                         }
+
+                        reason = $"existing non-terminal order '{order.Name}' ({order.OrderState}) " +
+                                 $"id={OrphanKey(order)} qty {order.Quantity} filled {order.Filled} " +
+                                 $"from {order.Time}; restart/adoption is not implemented";
+
+                        if (ambiguous)
+                            reason += ". State Unknown usually means NinjaTrader could not reconcile a record " +
+                                      "left by a crashed session; it cannot be cancelled because the order no " +
+                                      "longer exists, and it does NOT clear on restart. If the broker confirms " +
+                                      $"nothing is live, paste id={OrphanKey(order)} into 'Acknowledged orphan " +
+                                      "order IDs' on THIS chart and LEAVE IT THERE - it names this one dead " +
+                                      "order, so a future orphan still blocks";
+                        else if (!flat)
+                            reason += ". The account also holds a position, so this is real exposure";
+
+                        return false;
                     }
                 }
+
+                ReportStaleAcknowledgements(usedAcks);
             }
             catch (Exception ex)
             {
@@ -824,14 +868,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             lock (entrySetupsSync)
                 inFlight = submittingEntrySetup != null;
 
-            bool pending;
+            SeatStatus status;
             lock (routerStatusSync)
-                pending = routerSeatStatus == SeatStatus.Pending;
+                status = routerSeatStatus;
 
-            bool positionOpen = PositionAccount != null
-                && PositionAccount.MarketPosition != MarketPosition.Flat;
+            bool positionOpen = (PositionAccount != null
+                    && PositionAccount.MarketPosition != MarketPosition.Flat)
+                || (Position != null && Position.MarketPosition != MarketPosition.Flat);
 
-            if (inFlight || !pending || positionOpen
+            if (inFlight || status == SeatStatus.Free || positionOpen
                 || IsActiveOrder(longOrder) || HasActiveExitOrders()
                 || HasLiveOrderOnAccount())
             {
@@ -842,16 +887,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (pendingWithoutOrderSince == Core.Globals.MinDate)
             {
                 pendingWithoutOrderSince = DateTime.UtcNow;
-                Print($"[{EntrySignalName}] ⚠️ seat is Pending but the account is flat with no live " +
-                      "order of ours; will release the reservation if this persists");
+                Print($"[{EntrySignalName}] ⚠️ seat is {status} but the account and strategy are both " +
+                      "flat with no live order of ours; will release the reservation if this persists");
                 return;
             }
 
             if ((DateTime.UtcNow - pendingWithoutOrderSince).TotalSeconds < 30.0)
                 return;
 
-            Print($"[{EntrySignalName}] ⚠️ releasing an unbacked Pending reservation to Free. " +
-                  "The submission never reached the broker; the seat is available again.");
+            Print($"[{EntrySignalName}] ⚠️ releasing an unbacked {status} reservation to Free. " +
+                  "Broker state says flat with no live order, so the seat is available again.");
+            lock (routerStatusSync)
+                strategyPositionFlat = true;    // repair the cached flag the latch depends on
             SetRouterStatus(SeatStatus.Free);
             pendingWithoutOrderSince = Core.Globals.MinDate;
         }
@@ -1100,6 +1147,86 @@ namespace NinjaTrader.NinjaScript.Strategies
             return order != null && IsActiveOrderState(order.OrderState);
         }
 
+        /// <summary>
+        /// NinjaTrader reports Unknown for an order it could not reconcile - typically a
+        /// record left behind by a crashed session whose real order no longer exists at
+        /// the broker. It is not evidence of live exposure, but it is not evidence of
+        /// absence either, so it still blocks unless the operator acknowledges it.
+        /// </summary>
+        /// <summary>Stable identity for one broker order, used to acknowledge it specifically.</summary>
+        private string OrphanKey(Order order)
+        {
+            if (order == null)
+                return string.Empty;
+            string id = order.OrderId;
+            if (string.IsNullOrWhiteSpace(id))
+                id = string.Format(CultureInfo.InvariantCulture, "{0}@{1:yyyyMMddHHmmss}x{2}",
+                                   order.Name, order.Time, order.Quantity);
+            return id.Trim();
+        }
+
+        /// <summary>
+        /// Tells the operator when an acknowledged id no longer matches anything on the
+        /// account. NinjaTrader drops these records once the session rolls or the broker
+        /// reports a terminal state, so the setting is meant to be temporary - but nothing
+        /// else would ever say so, and a list that is never pruned eventually hides which
+        /// entries still matter.
+        /// </summary>
+        private void ReportStaleAcknowledgements(List<string> used)
+        {
+            if (string.IsNullOrWhiteSpace(AcknowledgeOrphanOrderIds))
+                return;
+
+            List<string> stale = new List<string>();
+            foreach (string entry in AcknowledgeOrphanOrderIds.Split(';', ','))
+            {
+                string key = entry.Trim();
+                if (key.Length == 0)
+                    continue;
+                bool matched = false;
+                foreach (string u in used)
+                {
+                    if (string.Equals(u, key, StringComparison.OrdinalIgnoreCase))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched)
+                    stale.Add(key);
+            }
+
+            if (stale.Count == 0)
+                return;
+
+            Print($"[{EntrySignalName}] ✅ Acknowledged orphan id(s) no longer match any order on " +
+                  $"{Account.Name}: {string.Join(", ", stale.ToArray())}. The record has cleared, so you " +
+                  "can remove them from 'Acknowledged orphan order IDs'. Leaving them is harmless but " +
+                  "they no longer do anything.");
+        }
+
+        private bool IsOrphanAcknowledged(Order order)
+        {
+            if (string.IsNullOrWhiteSpace(AcknowledgeOrphanOrderIds))
+                return false;
+
+            string key = OrphanKey(order);
+            if (string.IsNullOrEmpty(key))
+                return false;
+
+            foreach (string entry in AcknowledgeOrphanOrderIds.Split(';', ','))
+            {
+                if (string.Equals(entry.Trim(), key, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private bool IsAmbiguousOrderState(OrderState state)
+        {
+            return state == OrderState.Unknown;
+        }
+
         private bool IsActiveOrderState(OrderState state)
         {
             return state == OrderState.Initialized ||
@@ -1160,18 +1287,31 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             double halfTick = TickSize / 2.0;
 
+            // Match on the ORDER's own price, not the fill price. A buy stop-limit fills
+            // at its limit or BETTER, so a price-improved fill is several ticks below the
+            // order price and would never match the candle that placed it. The working
+            // order carries the latest re-priced value, which identifies the candle exactly.
+            double orderPrice = 0.0;
+            if (execution != null && execution.Order != null)
+            {
+                orderPrice = execution.Order.LimitPrice > 0
+                    ? execution.Order.LimitPrice : execution.Order.StopPrice;
+            }
+            if (orderPrice <= 0)
+                orderPrice = fillPrice;
+
             lock (entrySetupsSync)
             {
                 // A submission in flight is the newest candle and may not be bound yet.
                 if (submittingEntrySetup != null
                     && submittingEntrySetup.StopPrice < fillPrice
-                    && Math.Abs(submittingEntrySetup.EntryPrice - fillPrice) < halfTick)
+                    && Math.Abs(submittingEntrySetup.EntryPrice - orderPrice) < halfTick)
                     return submittingEntrySetup;
 
                 for (int i = recentEntrySetups.Count - 1; i >= 0; i--)
                 {
                     EntrySetup s = recentEntrySetups[i];
-                    if (s.StopPrice < fillPrice && Math.Abs(s.EntryPrice - fillPrice) < halfTick)
+                    if (s.StopPrice < fillPrice && Math.Abs(s.EntryPrice - orderPrice) < halfTick)
                         return s;
                 }
             }
@@ -1180,12 +1320,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             EntrySetup bound = ResolveExecutionSetup(execution, orderId);
             if (bound != null && bound.StopPrice < fillPrice)
             {
-                Print($"[{EntrySignalName}] ⚠️ no candle matches a fill at {fillPrice}; " +
-                      $"using the bound {bound.SignalTime} setup (stop {bound.StopPrice})");
+                Print($"[{EntrySignalName}] ⚠️ no candle matches order price {orderPrice} " +
+                      $"(fill {fillPrice}); using the bound {bound.SignalTime} setup " +
+                      $"(stop {bound.StopPrice})");
                 return bound;
             }
 
-            Print($"[{EntrySignalName}] ⛔ cannot identify the candle behind a fill at {fillPrice}; " +
+            Print($"[{EntrySignalName}] ⛔ cannot identify the candle behind order price {orderPrice} " +
+                  $"(fill {fillPrice}); " +
                   "refusing to reconstruct the trade from an unrelated setup");
             return null;
         }

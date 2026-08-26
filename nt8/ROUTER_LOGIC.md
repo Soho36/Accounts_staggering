@@ -143,6 +143,7 @@ identity `change in headroom = change in equity - change in floor`.
 - `⚠️ releasing an unbacked Pending reservation` — means a submission never
   reached the broker.
 - `⛔ PEAK NOT SEEDED` on any seat.
+- `⛔ STARTUP INTERLOCK` on any seat — it disarms the whole book, not just that seat.
 
 ## Why headroom falls by more than the trade lost
 
@@ -194,6 +195,70 @@ profit will look worse than it is.
 
 Until a seat's floor freezes (`peak >= start + dd + 100`), maximising MFE
 give-back is the fastest way to burn a container without losing a single trade.
+
+## Orphaned orders after a crash
+
+If the machine hangs or NinjaTrader dies with a working entry order, NT8 may keep
+a record of that order in state **`Unknown`** - it could not reconcile it. That
+record is **permanent**: it cannot be cancelled (the real order is gone), it does
+not clear on restart, and re-seeding the peak file does nothing, because this has
+nothing to do with peaks:
+
+```
+[Long1_1] STARTUP INTERLOCK - existing non-terminal order 'Long1_1' (Unknown)
+          id=<order id> qty 1 filled 0 from 26.08.2026 01:03:57 ...
+```
+
+**One blocked seat stops the entire book.** The other five register and seed
+normally, but quorum needs all six, so nothing trades anywhere.
+
+To clear it:
+
+1. Confirm at the broker that no such order is live and the account is flat.
+2. Copy the `id=` value out of the interlock message.
+3. Paste it into **`Acknowledged orphan order IDs`** on that one chart. Several
+   ids are separated with `;`.
+4. Re-enable the strategy. It prints `ACKNOWLEDGED ORPHAN` naming that id, and
+   registers.
+
+**Leave the id in place while the record still exists.** The check runs fresh at
+every startup, so emptying the field while NinjaTrader still holds the record
+re-blocks the seat immediately.
+
+You do not have to guess when it is safe to remove. Once NinjaTrader drops the
+record - normally at the next session rollover, or when the broker finally
+reports a terminal state - the strategy says so on startup:
+
+```
+[Long1_1] ✅ Acknowledged orphan id(s) no longer match any order on PA-APEX-240737-09:
+          <id>. The record has cleared, so you can remove them from
+          'Acknowledged orphan order IDs'.
+```
+
+Until that line appears, leave it. After it appears, clearing the field is
+tidiness rather than safety - a stale id matches nothing and does nothing. Either
+way a future orphan has a different id and still blocks correctly.
+
+### Two different checks - do not confuse them
+
+| Question | Where to look |
+|---|---|
+| Is it **safe to acknowledge**? | The **broker's** order book. Nothing of ours may be live. |
+| Can I **remove the id** without re-blocking? | NinjaTrader's **Orders** tab / the startup message. |
+
+The order being absent from the broker is exactly the situation that produces
+state `Unknown` in the first place - NinjaTrader asked, got nothing that
+reconciled, and kept its own record. So a clean broker book authorises the
+acknowledgement, but it does **not** mean the block is gone. The blocking record
+lives in NinjaTrader, not at the broker.
+
+Remove the id only once NinjaTrader itself no longer lists that order, which the
+startup message reports for you.
+
+The bypass is deliberately narrow. It applies only to state `Unknown`, only when
+the account position is flat, only to an id you listed, and never to an order in
+a genuinely live state such as `Working` or `Accepted`. It is not part of the book
+manifest, so setting it on one chart does not force the other five to match.
 
 ## Shutting down with open positions
 
