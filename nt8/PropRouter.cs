@@ -1214,7 +1214,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 				}
 				catch
 				{
-					return path;    // never let a disk problem change the interlock decision
+					// An empty result tells the caller that persistence failed.  The startup
+					// interlock still blocks independently; only the diagnostic changes.
+					return string.Empty;
 				}
 			}
 		}

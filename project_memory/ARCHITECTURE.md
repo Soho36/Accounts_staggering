@@ -94,9 +94,8 @@ state prove flat with no live order of ours, the seat is released after at least
 30 seconds. The wall-clock grace still needs a later bar callback, so on a
 30-minute series recovery can take roughly 30–60 minutes. This is necessary
 because both states previously became one-way latches that silently disarmed the
-whole book. Current exception: the runtime order scan still treats a specifically
-acknowledged `Unknown` orphan as live, even though startup permits it; see
-`STATE.md` / `TODO.md`.
+whole book. The runtime order scan uses the same narrow orphan exception as
+startup: flat position, `Unknown` state and exact acknowledged order id.
 
 ## Tooling (`nt8/`, run locally, never inside NinjaTrader)
 
@@ -104,7 +103,7 @@ acknowledged `Unknown` orphan as live, even though startup permits it; see
 |---|---|
 | `make_peak_file.py` | builds/verifies `peaks_<BOOK>.csv` from a broker statement; also `--seats sim` for untraded simulation accounts, `--check`, `--install`, `--report` |
 | `routing_report.py` | renders a routing log as a self-contained HTML session report (inline SVG, no server, no network) |
-| `tests/run-router-tests.ps1` | compiles the real `PropRouter.cs` against stubs and runs 15 regression cases |
+| `tests/run-router-tests.ps1` | compiles the real `PropRouter.cs` against stubs and runs 16 regression cases |
 
 ## State files — `Documents\NinjaTrader 8\PropRouter\`
 

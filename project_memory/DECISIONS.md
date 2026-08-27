@@ -207,11 +207,35 @@ and only to a listed id.
 was genuinely live, letting a seat start and duplicate exposure.
 **Also:** the router attempts to write the id to `blocked_orders_<BOOK>.csv` the
 moment the interlock fires, because the Output window is volatile. A disk failure
-must never weaken the interlock. The current write-failure reporting gap is
-tracked in `STATE.md` / `TODO.md`. **Never delete `db\NinjaTrader.sqlite` to clear
-one stale record** — that destroys order and trade history for every account.
+must never weaken the interlock. A failed write returns no path and the startup
+message explicitly tells the operator to copy the id; it must never claim the
+intended path was saved. **Never delete `db\NinjaTrader.sqlite` to clear one stale
+record** — that destroys order and trade history for every account.
 **Leave acknowledged ids in place** until startup reports they no longer match;
 the record does not clear on restart, so removing one re-blocks the seat.
+
+### 2026-08-28 — Runtime orphan handling must equal startup handling
+
+**Decision:** `HasLiveOrderOnAccount()` ignores an order only under the exact
+startup exception: the authoritative position view is flat, state is `Unknown`,
+and the specific id is acknowledged.
+**Reason:** Counting a known dead record as live defeats `Pending` / `InPosition`
+self-heal, but any broader exception can release a seat with real exposure.
+
+### 2026-08-28 — External flatten is reconciled from account truth at termination
+
+**Decision:** During `State.Terminated`, publish `Free` and unregister when
+`PositionAccount` is flat, the account order collection contains no active order
+of this strategy, and no entry submission is in flight. Do not require the
+strategy `Position` cache to have received its final callback.
+**Reason:** NinjaTrader account Auto Close can flatten with `External` orders and
+disable the strategy in the same event burst. The strategy position can remain
+stale even though the account is already flat. Conversely, an in-flight entry
+must keep the reservation fail-closed.
+**Consequence:** This changes lifecycle cleanup only. It does not submit, cancel
+or alter an entry, stop or take-profit order. If account truth is not yet clear,
+the reservation remains and the warning requires broker verification plus a full
+NinjaTrader restart.
 
 ---
 

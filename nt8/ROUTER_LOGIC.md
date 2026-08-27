@@ -222,11 +222,13 @@ to
 Documents\NinjaTrader 8\PropRouter\blocked_orders_<BOOK>.csv
 ```
 
-one row per order. Verify that the row actually exists before relying on it: a
-current diagnostic bug can print the intended path even if the write failed.
-Without a saved id, recover it from NinjaTrader/the broker records; never delete
-`db\NinjaTrader.sqlite`, which rebuilds the database and destroys order,
-execution and trade history for every account.
+one row per order. If the write fails, the interlock explicitly says that the id
+was **not** saved and tells the operator to copy it from the Output window; it no
+longer prints an intended path as though the file existed. A saved path is still
+worth verifying before closing the window. Without a saved id, recover it from
+NinjaTrader/the broker records; never delete `db\NinjaTrader.sqlite`, which
+rebuilds the database and destroys order, execution and trade history for every
+account.
 
 To clear it:
 
@@ -255,6 +257,11 @@ reports a terminal state - the strategy says so on startup:
 Until that line appears, leave it. After it appears, clearing the field is
 tidiness rather than safety - a stale id matches nothing and does nothing. Either
 way a future orphan has a different id and still blocks correctly.
+
+The same narrow exception is applied by runtime seat self-healing: only
+`Unknown` + flat + the exact acknowledged id is ignored. An unacknowledged id, a
+different id, a non-`Unknown` active state, or any non-flat position keeps the
+seat reserved.
 
 ### Two different checks - do not confuse them
 

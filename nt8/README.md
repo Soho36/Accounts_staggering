@@ -48,11 +48,12 @@ against a minimal `Globals.UserDataDir` stub:
 & .\tests\run-router-tests.ps1
 ```
 
-The current suite has 15 cases covering durable row preservation, strict CSV
+The current suite has 16 cases covering durable row preservation, strict CSV
 parsing, manifest/quorum readiness, atomic pending reservations, delayed-winner
 revalidation, transient peak capture, ownership/leases and fail-closed invalid
-state. It does **not** emulate NinjaTrader's managed-order engine; the Playback
-checklist remains mandatory for the strategy and broker lifecycle.
+state, plus truthful blocked-order persistence reporting. It does **not** emulate
+NinjaTrader's managed-order engine; the Playback checklist remains mandatory for
+the strategy and broker lifecycle.
 
 `signal_router.py` intentionally remains a completed-trade allocation model. It
 does not simulate red-candle order placement, pending stop orders, re-pricing,
@@ -237,6 +238,17 @@ cancellation are delegated to NinjaTrader's built-in
 template's session end. Test the exact BarsPeriod, template and global time zone
 in Playback; this is intentionally a minor difference from the checked-in
 original script.
+
+NinjaTrader's account-level **Auto Close** is a separate mechanism. If it fires
+before the strategy session-close time, it cancels orders, submits external
+flatten orders and disables the strategies while their final callbacks may still
+be arriving. Shutdown now reconciles a stale strategy position from the live
+account position and account order collection; if the external flatten is still
+in flight, it conservatively retains the reservation and tells the operator to
+verify flatness and restart. For deterministic ownership, configure the strategy
+session close to occur before account Auto Close with enough execution/callback
+margin. Changing either time changes the end-of-day exit and therefore requires a
+Playback comparison; it is not silently changed by this project.
 
 The following core order semantics are intentional and match the original
 strategy design:
@@ -682,8 +694,10 @@ detail must show the expected fail-closed cause.
   a close above target. Confirm only the latter submits the close-plus-offset
   limit and record whether it fills.
 - [ ] **End of day:** verify NinjaTrader's built-in session-close exit flattens
-  and cancels at the Trading Hours template's session end. There is no
-  strategy-level cutoff to test.
+  and cancels at the Trading Hours template's session end. Also record the
+  account-level Auto Close time and prove the strategy close occurs first with
+  enough margin; otherwise Auto Close disables the strategies mid-reconciliation.
+  There is no strategy-level 23:57 cutoff to test.
 - [ ] **Restart:** first restart flat/no-orders and confirm peaks survive. Then,
   on simulation only, attempt startup with a position and with a non-terminal
   strategy order; confirm the startup interlock refuses adoption.

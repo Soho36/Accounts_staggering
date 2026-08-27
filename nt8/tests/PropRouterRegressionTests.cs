@@ -67,6 +67,7 @@ internal static class PropRouterRegressionTests
         Run("unsafe book identifiers are rejected", TestUnsafeBookIdentifier);
         Run("duplicate instance and duplicate account registrations are refused", TestDuplicateRegistration);
         Run("stale lease callbacks are ignored after a safe takeover", TestStaleLeaseCallbacksAreIgnored);
+        Run("blocked-order write failure returns no saved path", TestBlockedOrderWriteFailureIsVisible);
 
         Console.WriteLine();
         Console.WriteLine("Result: {0} passed, {1} failed", passed, failed);
@@ -650,6 +651,28 @@ internal static class PropRouterRegressionTests
         finally
         {
             PropRouter.StaleSeconds = originalStaleSeconds;
+        }
+    }
+
+    private static void TestBlockedOrderWriteFailureIsVisible()
+    {
+        string originalUserDataDir = NinjaTrader.Core.Globals.UserDataDir;
+        string blockingFile = Path.Combine(originalUserDataDir, "not-a-user-data-directory");
+        File.WriteAllText(blockingFile, "This file deliberately prevents creation of PropRouter beneath it.");
+
+        try
+        {
+            NinjaTrader.Core.Globals.UserDataDir = blockingFile;
+            string savedPath = PropRouter.RecordBlockedOrder(
+                "WRITE_FAILURE", 1, "ACCOUNT-1", "Long1_1", "ORDER-123", "Unknown",
+                1, 0, new DateTime(2026, 8, 28, 12, 0, 0));
+
+            Expect(string.IsNullOrEmpty(savedPath),
+                "a failed blocked-order write incorrectly returned a saved path: " + savedPath);
+        }
+        finally
+        {
+            NinjaTrader.Core.Globals.UserDataDir = originalUserDataDir;
         }
     }
 

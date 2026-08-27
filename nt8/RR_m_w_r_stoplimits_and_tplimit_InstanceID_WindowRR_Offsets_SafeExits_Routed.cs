@@ -636,6 +636,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 PublishStatus();
 
+                // Account-level Auto Close can flatten externally and disable this strategy
+                // before its final strategy-position callback arrives.  At termination the
+                // account position plus the account order collection are the authoritative
+                // facts: if both are clear, publish Free once more so a stale strategy-side
+                // position cannot strand the static reservation in this NT process.
+                bool accountFlat = IsAccountFlatNow();
+                bool liveStrategyOrder = HasLiveOrderOnAccount(accountFlat);
+                bool submissionInFlight;
+                lock (entrySetupsSync)
+                    submissionInFlight = submittingEntrySetup != null;
+
+                if (accountFlat && !liveStrategyOrder && !submissionInFlight)
+                    SetRouterStatus(SeatStatus.Free);
+
                 bool holdsExposure;
                 lock (routerStatusSync)
                     holdsExposure = routerSeatStatus != SeatStatus.Free;
@@ -647,12 +661,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 else if (holdsExposure)
                 {
-                    // Not a malfunction: the seat still holds a position or a working order,
-                    // so the reservation is deliberately retained rather than handed away.
                     Print($"[{EntrySignalName}] ⚠️ seat retained on shutdown — {reason}.");
-                    Print($"[{EntrySignalName}] ⚠️ This account still has broker exposure. Flatten it " +
-                          "and cancel its orders before restarting, or the startup preflight will " +
-                          "refuse this seat and the book will never reach quorum.");
+                    Print($"[{EntrySignalName}] ⚠️ At termination the account/order snapshots were not " +
+                          $"yet proven clear (accountFlat={accountFlat}, liveStrategyOrder={liveStrategyOrder}, " +
+                          $"submissionInFlight={submissionInFlight}). " +
+                          "NinjaTrader account Auto Close may still be in flight. Verify the broker account is " +
+                          "flat with no working strategy orders, then fully restart NinjaTrader before enabling " +
+                          "the book again.");
                 }
                 else
                 {
@@ -812,6 +827,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                         if (!string.IsNullOrEmpty(recordPath))
                             reason += $". This id is saved in {recordPath}, so it survives the " +
                                       "Output window";
+                        else
+                            reason += ". WARNING: the order id could not be saved to the PropRouter audit " +
+                                      "file. Copy the id from this message before closing the Output window";
 
                         if (ambiguous)
                             reason += ". State Unknown usually means NinjaTrader could not reconcile a record " +
@@ -842,6 +860,16 @@ namespace NinjaTrader.NinjaScript.Strategies
         /// <summary>Authoritative broker check: does this account hold any live order of ours?</summary>
         private bool HasLiveOrderOnAccount()
         {
+            return HasLiveOrderOnAccount(IsFlatEverywhere());
+        }
+
+        /// <summary>
+        /// The acknowledged-orphan exception is deliberately identical to startup: only an
+        /// exact-id match in ambiguous Unknown state, and only when the supplied authoritative
+        /// position view is flat. Every other active-looking order keeps the seat reserved.
+        /// </summary>
+        private bool HasLiveOrderOnAccount(bool flatForOrphanAcknowledgement)
+        {
             try
             {
                 if (Account == null || Instrument == null)
@@ -856,8 +884,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                         if (!string.Equals(order.Instrument.FullName, Instrument.FullName,
                                 StringComparison.OrdinalIgnoreCase))
                             continue;
-                        if (IsOurSignalName(order.Name) && IsActiveOrder(order))
-                            return true;
+                        if (!IsOurSignalName(order.Name) || !IsActiveOrder(order))
+                            continue;
+
+                        if (flatForOrphanAcknowledgement
+                            && IsAmbiguousOrderState(order.OrderState)
+                            && IsOrphanAcknowledged(order))
+                            continue;
+
+                        return true;
                     }
                 }
                 return false;
@@ -1017,6 +1052,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return strategyFlat && accountFlat;
             }
             catch { return false; }     // cannot prove flat - stay reserved
+        }
+
+        /// <summary>
+        /// Account-only flatness is used only during termination reconciliation.  An external
+        /// account flatten can make the strategy Position stale, but it cannot leave the
+        /// account PositionAccount non-flat once the execution has completed.
+        /// </summary>
+        private bool IsAccountFlatNow()
+        {
+            try
+            {
+                return PositionAccount == null
+                    || PositionAccount.MarketPosition == MarketPosition.Flat;
+            }
+            catch { return false; }     // cannot prove flat - retain the reservation
         }
 
         private void PublishStatus()

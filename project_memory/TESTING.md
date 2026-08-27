@@ -15,12 +15,16 @@ python -m unittest discover -s tests -v
 
 Current expected result: `Ran 24 tests` and `OK`.
 
+Host note (2026-08-28): `venv\Scripts\python.exe` currently resolves to a missing
+Python 3.9 base interpreter, while system Python 3.12 does not have NumPy/Pandas.
+Repair/recreate the venv before treating a skipped rerun as a passing result.
+
 ---
 
 ## Router regression suite
 
 Compiles the **real** `PropRouter.cs` against a minimal NinjaTrader stub and runs
-15 cases. Fast; run it after any change to `PropRouter.cs`.
+16 cases. Fast; run it after any change to `PropRouter.cs`.
 
 ```powershell
 cd nt8\tests

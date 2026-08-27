@@ -1,7 +1,7 @@
 # STATE
 
 *Describes now. Rewrite it; do not append history.*
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## Current status
 
@@ -17,7 +17,7 @@ accounts under close observation. The offline study is complete and unchanged.
   published threshold.
 - Analysis: `routing_report.py` renders a routing log as a self-contained HTML
   session report.
-- Router regression suite: 15/15.
+- Router regression suite: 16/16.
 - Python regression suite: 24/24.
 
 **Live book seats** (drawdowns are non-uniform):
@@ -36,32 +36,36 @@ accounts at 100000 start.
 
 ## Current work
 
-Three fixes are verified in source and local checks, but the repository cannot
-prove whether the current NinjaTrader process has compiled them or whether they
-have passed live validation:
+The 27 August live session ran smoothly overall and confirmed routing/order flow,
+but exposed stale `InPosition` status after exits and an account-level Auto Close
+race at 23:59. Current source now:
 
-1. `InPosition` / `Pending` self-heal from broker state.
-2. Fill identified by the order's limit price rather than the fill price.
-3. `blocked_orders_<BOOK>.csv` — best-effort orphan-id persistence.
+1. derives flatness live from both `Position` and `PositionAccount` on every
+   status derivation instead of trusting the cached callback flag;
+2. applies the exact same flat + `Unknown` + exact-id orphan acknowledgement at
+   startup and during runtime self-heal;
+3. reports blocked-order persistence failure truthfully (empty path plus an
+   explicit copy-the-id warning); and
+4. reconciles shutdown from account position/order truth when NinjaTrader flattens
+   externally, without changing any entry, stop or profit-taking order rule.
 
-**Confirm the deployed NinjaScript revision in the NinjaScript Editor and
-recompile if necessary before relying on them.** Until live confirmation, assume
-the running book may still exhibit the earlier latch behaviour.
+The router suite is green, but NinjaTrader must compile this revision and the
+next live/Playback session must confirm the lifecycle changes.
 
 ## Known issues
 
 **Blocking**
 
-- *(needs live confirmation)* Whether the `InPosition` self-heal actually clears
-  the latch. Root cause of the latch itself was never isolated — the fix works
-  around it by re-deriving status from broker state rather than trusting the
-  cached flag. Watch for `⚠️ releasing an unbacked InPosition reservation`; if it
-  appears, the latch is still forming.
-- *(confirmed source gap)* `HasLiveOrderOnAccount()` treats every `Unknown` order
-  as live, even when that exact id was accepted by the narrow startup orphan
-  acknowledgement. Instance 1's known orphan can therefore prevent its
-  `Pending` / `InPosition` self-heal until the stale record disappears. Startup
-  and runtime must apply the same flat + `Unknown` + exact-id rule.
+- *(needs live confirmation)* Whether live flatness derivation clears every stale
+  `InPosition` / `Pending` latch. Watch for `⚠️ releasing an unbacked ...
+  reservation`; that means a callback latch still formed but was recovered.
+- *(needs timing decision)* NinjaTrader account Auto Close is configured for
+  23:59 while the fixed strategy session-close is 30 seconds before a midnight
+  session end (23:59:30). Auto Close therefore wins, sends `External` market
+  exits and disables all strategies during callback reconciliation. Source now
+  handles a completed external flatten cleanly, but deterministic ownership
+  requires the strategy close to be scheduled earlier than Auto Close with a
+  tested margin. Changing that time changes end-of-day P&L and is not automatic.
 
 **Live-release blockers** (also listed in `nt8/README.md`)
 
@@ -74,29 +78,29 @@ the running book may still exhibit the earlier latch behaviour.
 
 **Operational**
 
-- Instance 1 is blocked by an orphan order `id=2870535822` (state `Unknown`,
-  26.08.2026 01:03:57) unless that id is present in *Acknowledged orphan order
-  IDs* on its chart. It must stay there until startup reports it no longer
-  matches. One blocked seat disarms the whole book.
-- `RecordBlockedOrder()` is best-effort. On an I/O failure it currently returns
-  the intended non-empty path, so the interlock text can incorrectly say the id
-  was saved. The interlock remains fail-closed, but the audit-file claim must be
-  verified on disk until this diagnostic bug is fixed.
+- Startup on 27 August reported orphan `id=2870535822` no longer matches any
+  order. It can be removed from Instance 1's *Acknowledged orphan order IDs* field.
 - `peaks_LIVE.csv` is no longer in the repo folder; the live copy in
   `Documents\NinjaTrader 8\PropRouter\` is authoritative.
 - `nt8/Broker_statement.csv` has been re-exported with fresh balances; a stale
   hand-edited test value was removed.
+- On this host the checked-in-path `venv` launcher currently points to a missing
+  Python 3.9 installation; system Python 3.12 lacks NumPy/Pandas. The recorded
+  24/24 Python result is the last known result, not a rerun from 28 August. The
+  independent C# router suite is unaffected.
 
 ## Next steps
 
-1. Make the runtime order scan honor the same narrow acknowledged-orphan rule as
-   startup, then recompile in NinjaScript Editor. Confirm all six seats register
-   and that a completed trade returns its seat to `Free`.
-2. Run a full session and render it with `routing_report.py`; confirm no seat
-   latches and no `⚠️`/`⛔` lines beyond the known orphan.
-3. Decide the `protect_frozen` question: seats 1 and 2 are frozen and
+1. Recompile in NinjaScript Editor. Confirm all six seats register and a completed
+   trade returns its seat to `Free` without the acknowledged orphan blocking
+   runtime self-heal.
+2. Playback-test end of session and choose an ordering that makes the strategy
+   session close complete before account Auto Close; then repeat one live close.
+3. Run a full session and render it with `routing_report.py`; confirm no seat
+   latches and no unexplained `⚠️`/`⛔` lines.
+4. Decide the `protect_frozen` question: seats 1 and 2 are frozen and
    payout-capable, and `max_headroom` ranks them first, so they take most
    signals. `signal_router.py` has a policy that deliberately does the opposite.
-4. Replay live decisions through `signal_router.py`'s allocator and confirm the
+5. Replay live decisions through `signal_router.py`'s allocator and confirm the
    chosen seat matches on every decision.
-5. Address the zero-band stop-limit gap before any live-ready claim.
+6. Address the zero-band stop-limit gap before any live-ready claim.
