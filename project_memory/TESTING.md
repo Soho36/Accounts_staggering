@@ -5,6 +5,18 @@ code; most of it exists because a check was missing when something broke.
 
 ---
 
+## Python regression suite
+
+Run after changes to the study, peak helper or their tests:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Current expected result: `Ran 24 tests` and `OK`.
+
+---
+
 ## Router regression suite
 
 Compiles the **real** `PropRouter.cs` against a minimal NinjaTrader stub and runs
@@ -60,12 +72,14 @@ Before any live session, confirm the seeds still match the broker:
 
 ```bash
 cd nt8
-python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv   # 0 = current, 1 = stale
+python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv   # 0 = matches source, 1 = mismatch
 python make_peak_file.py --seats sim --check peaks_SIM.csv
 ```
 
-The generator self-verifies and refuses to write on any disagreement. Known
-failure modes it catches, each of which has occurred:
+Use a freshly exported statement: exit `0` proves equality with the supplied
+source and strict schema, not that the statement itself is current. The
+generator self-verifies and refuses to write on any disagreement. Known failure
+modes it catches, each of which has occurred:
 
 | Symptom | Cause |
 |---|---|
@@ -104,7 +118,8 @@ skipping this.
 2. **`routing_<BOOK>_<date>.csv`** — authoritative for what the router believed:
    per-seat equity, peak, floor, headroom, status, winners, `detail`.
 3. **NinjaTrader trade export** — realised P&L, MAE, MFE, ETD.
-4. **Output window** — convenience only. Volatile, and it omits exits entirely.
+4. **Output window** — convenience only. Volatile, and it does not reliably
+   record terminal exit fills.
 
 Do not reconstruct equity from headroom assuming `floor = start - dd`. That holds
 only before a seat has ever been in profit; the ratchet breaks it.
@@ -121,6 +136,8 @@ Re-test these whenever entry, exit, order-state or routing code changes.
 | **Price-improved fill** | a buy stop-limit fills at its limit *or better*; matching by fill price falsely reports "no candle matches" |
 | **Trade completes, next signal arrives** | the seat must return to `Free`; both `Pending` and `InPosition` have been one-way latches that silently disarmed the whole book |
 | **Restart with a stale `Unknown` order** | must block, must record the id to `blocked_orders_<BOOK>.csv`, must be clearable by listing that id |
+| **Acknowledged orphan plus self-heal** | the exact flat `Unknown` id may be ignored during startup and runtime reconciliation; any different id or non-`Unknown` state must still preserve the reservation |
+| **Blocked-order audit write fails** | startup must remain blocked and must report that persistence failed, never claim an id was saved when no row exists |
 | **Restart while a seat is flat** | peaks must reload identically; a changed peak file needs a **full NT8 restart**, not a strategy re-enable |
 | **Mixed chart configuration** | differing window R:R or BarsPeriod must refuse registration — all 24 R:R values are in the manifest fingerprint |
 | **Shutdown with an open position** | unregister is refused on purpose; that account must be flattened before the next start or the book never reaches quorum |

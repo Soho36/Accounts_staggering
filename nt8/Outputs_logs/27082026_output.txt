@@ -1,0 +1,566 @@
+Enabling NinjaScript strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203019' : On starting a real-time strategy - StartBehavior=ImmediatelySubmit EntryHandling=Unique entries EntriesPerDirection=1 StopTargetHandling=Per entry execution ErrorHandling=Ignore all errors ExitOnSessionClose=True / triggering 30 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Keep running DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=True CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
+=== Strategy entering REALTIME mode (Instance 1, signal=Long1_1) ===
+[Long1_1] ✅ Acknowledged orphan id(s) no longer match any order on PA-APEX-240737-09: 2870535822. The record has cleared, so you can remove them from 'Acknowledged orphan order IDs'. Leaving them is harmless but they no longer do anything.
+[Long1_1] 🔗 seat registered — book=LIVE account=PA-APEX-240737-09 start=25000 dd=1500 freeze=+100 mode=Routed seats=6 R=1
+[Long1_1]    seeded
+Enabling NinjaScript strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203020' : On starting a real-time strategy - StartBehavior=ImmediatelySubmit EntryHandling=Unique entries EntriesPerDirection=1 StopTargetHandling=Per entry execution ErrorHandling=Ignore all errors ExitOnSessionClose=True / triggering 30 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Keep running DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=True CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
+=== Strategy entering REALTIME mode (Instance 2, signal=Long1_2) ===
+[Long1_2] 🔗 seat registered — book=LIVE account=PA-APEX-240737-10 start=25000 dd=1500 freeze=+100 mode=Routed seats=6 R=1
+[Long1_2]    seeded
+Enabling NinjaScript strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203021' : On starting a real-time strategy - StartBehavior=ImmediatelySubmit EntryHandling=Unique entries EntriesPerDirection=1 StopTargetHandling=Per entry execution ErrorHandling=Ignore all errors ExitOnSessionClose=True / triggering 30 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Keep running DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=True CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
+=== Strategy entering REALTIME mode (Instance 3, signal=Long1_3) ===
+[Long1_3] 🔗 seat registered — book=LIVE account=PA-APEX-240737-12 start=50000 dd=2000 freeze=+100 mode=Routed seats=6 R=1
+[Long1_3]    seeded
+Enabling NinjaScript strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203022' : On starting a real-time strategy - StartBehavior=ImmediatelySubmit EntryHandling=Unique entries EntriesPerDirection=1 StopTargetHandling=Per entry execution ErrorHandling=Ignore all errors ExitOnSessionClose=True / triggering 30 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Keep running DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=True CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
+=== Strategy entering REALTIME mode (Instance 4, signal=Long1_4) ===
+[Long1_4] 🔗 seat registered — book=LIVE account=PA-APEX-240737-13 start=50000 dd=2000 freeze=+100 mode=Routed seats=6 R=1
+[Long1_4]    seeded
+Enabling NinjaScript strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203023' : On starting a real-time strategy - StartBehavior=ImmediatelySubmit EntryHandling=Unique entries EntriesPerDirection=1 StopTargetHandling=Per entry execution ErrorHandling=Ignore all errors ExitOnSessionClose=True / triggering 30 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Keep running DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=True CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
+=== Strategy entering REALTIME mode (Instance 5, signal=Long1_5) ===
+[Long1_5] 🔗 seat registered — book=LIVE account=PA-APEX-240737-14 start=50000 dd=2000 freeze=+100 mode=Routed seats=6 R=1
+[Long1_5]    seeded
+Enabling NinjaScript strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203024' : On starting a real-time strategy - StartBehavior=ImmediatelySubmit EntryHandling=Unique entries EntriesPerDirection=1 StopTargetHandling=Per entry execution ErrorHandling=Ignore all errors ExitOnSessionClose=True / triggering 30 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Keep running DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=True CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
+=== Strategy entering REALTIME mode (Instance 6, signal=Long1_6) ===
+[Long1_6] 🔗 seat registered — book=LIVE account=PA-APEX-240737-15 start=50000 dd=2500 freeze=+100 mode=Routed seats=6 R=1
+[Long1_6]    seeded
+[27.08.2026 02:00:00] [Long1_1] Trade window state changed -> INSIDE
+[27.08.2026 02:00:00] [Long1_2] Trade window state changed -> INSIDE
+[27.08.2026 02:00:00] [Long1_3] Trade window state changed -> INSIDE
+[27.08.2026 02:00:00] [Long1_4] Trade window state changed -> INSIDE
+[27.08.2026 02:00:00] [Long1_5] Trade window state changed -> INSIDE
+[27.08.2026 02:00:00] [Long1_6] Trade window state changed -> INSIDE
+[27.08.2026 02:30:00] [Long1_1] Window R:R=1
+[27.08.2026 02:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 02:30:00] [Long1_1] Entry=29614.75 SL=29585.25 Risk=29.5
+[27.08.2026 02:30:00] [Long1_1] ✅ routed here — selected; headroom=3058.10; winners=[1]; book 1:3058.10(Pending) 2:2480.60 6:2227.41 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 02:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29614.75 (new routed signal)
+[27.08.2026 02:30:00] [Long1_2] Window R:R=1
+[27.08.2026 02:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 02:30:00] [Long1_2] Entry=29614.75 SL=29585.25 Risk=29.5
+[27.08.2026 02:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[1]
+[27.08.2026 02:30:00] [Long1_3] Window R:R=1
+[27.08.2026 02:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 02:30:00] [Long1_3] Entry=29614.75 SL=29585.25 Risk=29.5
+[27.08.2026 02:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[1]
+[27.08.2026 02:30:00] [Long1_4] Window R:R=1
+[27.08.2026 02:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 02:30:00] [Long1_4] Entry=29614.75 SL=29585.25 Risk=29.5
+[27.08.2026 02:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[1]
+[27.08.2026 02:30:00] [Long1_5] Window R:R=1
+[27.08.2026 02:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 02:30:00] [Long1_5] Entry=29614.75 SL=29585.25 Risk=29.5
+[27.08.2026 02:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[1]
+[27.08.2026 02:30:00] [Long1_6] Window R:R=1
+[27.08.2026 02:30:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 02:30:00] [Long1_6] Entry=29614.75 SL=29585.25 Risk=29.5
+[27.08.2026 02:30:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[1]
+[27.08.2026 02:45:26] [Long1_1] 🚀 Entry FILLED at 29613.5 - Submitting STOP-LIMIT immediately
+[27.08.2026 02:45:26] [Long1_1]    Stop=29585.25, Limit=29585.25, Risk=28.25
+[27.08.2026 03:00:00] [Long1_1] 1R reached: Bar Close=29647.5, Target=29641.75
+[27.08.2026 03:00:00] [Long1_1] Limit order submitted @ 29647.75 (target=29641.75, offset=1 ticks, signal=RR_Limit_1)
+[27.08.2026 03:30:00] [Long1_1] Window R:R=1
+[27.08.2026 03:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 03:30:00] [Long1_1] Entry=29655.75 SL=29558 Risk=97.75
+[27.08.2026 03:30:00] [Long1_1] ✅ routed here — selected; headroom=3134.08; winners=[1]; book 1:3134.08(Pending) 2:2480.60 6:2227.41 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 03:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29655.75 (new routed signal)
+[27.08.2026 03:30:00] [Long1_2] Window R:R=1
+[27.08.2026 03:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 03:30:00] [Long1_2] Entry=29655.75 SL=29558 Risk=97.75
+[27.08.2026 03:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[1]
+[27.08.2026 03:30:00] [Long1_3] Window R:R=1
+[27.08.2026 03:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 03:30:00] [Long1_3] Entry=29655.75 SL=29558 Risk=97.75
+[27.08.2026 03:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[1]
+[27.08.2026 03:30:00] [Long1_4] Window R:R=1
+[27.08.2026 03:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 03:30:00] [Long1_4] Entry=29655.75 SL=29558 Risk=97.75
+[27.08.2026 03:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[1]
+[27.08.2026 03:30:00] [Long1_5] Window R:R=1
+[27.08.2026 03:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 03:30:00] [Long1_5] Entry=29655.75 SL=29558 Risk=97.75
+[27.08.2026 03:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[1]
+[27.08.2026 03:30:00] [Long1_6] Window R:R=1
+[27.08.2026 03:30:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 03:30:00] [Long1_6] Entry=29655.75 SL=29558 Risk=97.75
+[27.08.2026 03:30:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[1]
+[27.08.2026 04:00:00] [Long1_1] Window R:R=1
+[27.08.2026 04:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 04:00:00] [Long1_1] Entry=29581.5 SL=29438 Risk=143.5
+[27.08.2026 04:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29581.5 (re-priced working entry)
+[27.08.2026 04:00:00] [Long1_2] Window R:R=1
+[27.08.2026 04:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 04:00:00] [Long1_2] Entry=29581.5 SL=29438 Risk=143.5
+[27.08.2026 04:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[none]
+[27.08.2026 04:00:00] [Long1_3] Window R:R=1
+[27.08.2026 04:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 04:00:00] [Long1_3] Entry=29581.5 SL=29438 Risk=143.5
+[27.08.2026 04:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 04:00:00] [Long1_4] Window R:R=1
+[27.08.2026 04:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 04:00:00] [Long1_4] Entry=29581.5 SL=29438 Risk=143.5
+[27.08.2026 04:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 04:00:00] [Long1_5] Window R:R=1
+[27.08.2026 04:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 04:00:00] [Long1_5] Entry=29581.5 SL=29438 Risk=143.5
+[27.08.2026 04:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 04:00:00] [Long1_6] Window R:R=1
+[27.08.2026 04:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 04:00:00] [Long1_6] Entry=29581.5 SL=29438 Risk=143.5
+[27.08.2026 04:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 07:00:00] [Long1_1] Window R:R=1
+[27.08.2026 07:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:00:00] [Long1_1] Entry=29572.5 SL=29526 Risk=46.5
+[27.08.2026 07:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29572.5 (re-priced working entry)
+[27.08.2026 07:00:00] [Long1_2] Window R:R=1
+[27.08.2026 07:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:00:00] [Long1_2] Entry=29572.5 SL=29526 Risk=46.5
+[27.08.2026 07:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[none]
+[27.08.2026 07:00:00] [Long1_3] Window R:R=1
+[27.08.2026 07:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:00:00] [Long1_3] Entry=29572.5 SL=29526 Risk=46.5
+[27.08.2026 07:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 07:00:00] [Long1_4] Window R:R=1
+[27.08.2026 07:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:00:00] [Long1_4] Entry=29572.5 SL=29526 Risk=46.5
+[27.08.2026 07:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 07:00:00] [Long1_5] Window R:R=1
+[27.08.2026 07:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:00:00] [Long1_5] Entry=29572.5 SL=29526 Risk=46.5
+[27.08.2026 07:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 07:00:00] [Long1_6] Window R:R=1
+[27.08.2026 07:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:00:00] [Long1_6] Entry=29572.5 SL=29526 Risk=46.5
+[27.08.2026 07:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 07:30:00] [Long1_1] Window R:R=1
+[27.08.2026 07:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:30:00] [Long1_1] Entry=29551.75 SL=29528 Risk=23.75
+[27.08.2026 07:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29551.75 (re-priced working entry)
+[27.08.2026 07:30:00] [Long1_2] Window R:R=1
+[27.08.2026 07:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:30:00] [Long1_2] Entry=29551.75 SL=29528 Risk=23.75
+[27.08.2026 07:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[none]
+[27.08.2026 07:30:00] [Long1_3] Window R:R=1
+[27.08.2026 07:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:30:00] [Long1_3] Entry=29551.75 SL=29528 Risk=23.75
+[27.08.2026 07:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 07:30:00] [Long1_4] Window R:R=1
+[27.08.2026 07:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:30:00] [Long1_4] Entry=29551.75 SL=29528 Risk=23.75
+[27.08.2026 07:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 07:30:00] [Long1_5] Window R:R=1
+[27.08.2026 07:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:30:00] [Long1_5] Entry=29551.75 SL=29528 Risk=23.75
+[27.08.2026 07:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 07:30:00] [Long1_6] Window R:R=1
+[27.08.2026 07:30:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 07:30:00] [Long1_6] Entry=29551.75 SL=29528 Risk=23.75
+[27.08.2026 07:30:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 08:00:00] [Long1_1] Window R:R=1
+[27.08.2026 08:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:00:00] [Long1_1] Entry=29531.25 SL=29493.25 Risk=38
+[27.08.2026 08:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29531.25 (re-priced working entry)
+[27.08.2026 08:00:00] [Long1_2] Window R:R=1
+[27.08.2026 08:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:00:00] [Long1_2] Entry=29531.25 SL=29493.25 Risk=38
+[27.08.2026 08:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[none]
+[27.08.2026 08:00:00] [Long1_3] Window R:R=1
+[27.08.2026 08:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:00:00] [Long1_3] Entry=29531.25 SL=29493.25 Risk=38
+[27.08.2026 08:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 08:00:00] [Long1_4] Window R:R=1
+[27.08.2026 08:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:00:00] [Long1_4] Entry=29531.25 SL=29493.25 Risk=38
+[27.08.2026 08:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 08:00:00] [Long1_5] Window R:R=1
+[27.08.2026 08:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:00:00] [Long1_5] Entry=29531.25 SL=29493.25 Risk=38
+[27.08.2026 08:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 08:00:00] [Long1_6] Window R:R=1
+[27.08.2026 08:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:00:00] [Long1_6] Entry=29531.25 SL=29493.25 Risk=38
+[27.08.2026 08:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 08:30:00] [Long1_1] Window R:R=1
+[27.08.2026 08:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:30:00] [Long1_1] Entry=29504.75 SL=29447.75 Risk=57
+[27.08.2026 08:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29504.75 (re-priced working entry)
+[27.08.2026 08:30:00] [Long1_2] Window R:R=1
+[27.08.2026 08:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:30:00] [Long1_2] Entry=29504.75 SL=29447.75 Risk=57
+[27.08.2026 08:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[none]
+[27.08.2026 08:30:00] [Long1_3] Window R:R=1
+[27.08.2026 08:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:30:00] [Long1_3] Entry=29504.75 SL=29447.75 Risk=57
+[27.08.2026 08:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 08:30:00] [Long1_4] Window R:R=1
+[27.08.2026 08:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:30:00] [Long1_4] Entry=29504.75 SL=29447.75 Risk=57
+[27.08.2026 08:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 08:30:00] [Long1_5] Window R:R=1
+[27.08.2026 08:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:30:00] [Long1_5] Entry=29504.75 SL=29447.75 Risk=57
+[27.08.2026 08:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 08:30:00] [Long1_6] Window R:R=1
+[27.08.2026 08:30:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 08:30:00] [Long1_6] Entry=29504.75 SL=29447.75 Risk=57
+[27.08.2026 08:30:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 09:00:00] [Long1_1] Window R:R=1
+[27.08.2026 09:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 09:00:00] [Long1_1] Entry=29471.75 SL=29428.25 Risk=43.5
+[27.08.2026 09:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29471.75 (re-priced working entry)
+[27.08.2026 09:00:00] [Long1_2] Window R:R=1
+[27.08.2026 09:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 09:00:00] [Long1_2] Entry=29471.75 SL=29428.25 Risk=43.5
+[27.08.2026 09:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2480.60; winners=[none]
+[27.08.2026 09:00:00] [Long1_3] Window R:R=1
+[27.08.2026 09:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 09:00:00] [Long1_3] Entry=29471.75 SL=29428.25 Risk=43.5
+[27.08.2026 09:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 09:00:00] [Long1_4] Window R:R=1
+[27.08.2026 09:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 09:00:00] [Long1_4] Entry=29471.75 SL=29428.25 Risk=43.5
+[27.08.2026 09:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 09:00:00] [Long1_5] Window R:R=1
+[27.08.2026 09:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 09:00:00] [Long1_5] Entry=29471.75 SL=29428.25 Risk=43.5
+[27.08.2026 09:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 09:00:00] [Long1_6] Window R:R=1
+[27.08.2026 09:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 09:00:00] [Long1_6] Entry=29471.75 SL=29428.25 Risk=43.5
+[27.08.2026 09:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 09:35:54] [Long1_1] 🚀 Entry FILLED at 29471.75 - Submitting STOP-LIMIT immediately
+[27.08.2026 09:35:54] [Long1_1]    Stop=29428.25, Limit=29428.25, Risk=43.5
+[27.08.2026 10:30:00] [Long1_1] 1R reached: Bar Close=29548.75, Target=29515.25
+[27.08.2026 10:30:00] [Long1_1] Limit order submitted @ 29549 (target=29515.25, offset=1 ticks, signal=RR_Limit_1)
+[Long1_1] ⚠️ seat is InPosition but the account and strategy are both flat with no live order of ours; will release the reservation if this persists
+[27.08.2026 11:00:00] [Long1_1] Window R:R=1
+[27.08.2026 11:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 11:00:00] [Long1_1] Entry=29549.75 SL=29499.25 Risk=50.5
+[27.08.2026 11:00:00] [Long1_1] ↪ not routed here — not selected; headroom=3287.56; winners=[2]
+[27.08.2026 11:00:00] [Long1_2] Window R:R=1
+[27.08.2026 11:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 11:00:00] [Long1_2] Entry=29549.75 SL=29499.25 Risk=50.5
+[27.08.2026 11:00:00] [Long1_2] ✅ routed here — selected; headroom=2480.60; winners=[2]; book 1:3287.56(InPosition) 2:2480.60(Pending) 6:2227.41 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 11:00:00] [Long1_2] Submitted BUY STOP-LIMIT @ 29549.75 (new routed signal)
+[27.08.2026 11:00:00] [Long1_3] Window R:R=1
+[27.08.2026 11:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 11:00:00] [Long1_3] Entry=29549.75 SL=29499.25 Risk=50.5
+[27.08.2026 11:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[2]
+[27.08.2026 11:00:00] [Long1_4] Window R:R=1
+[27.08.2026 11:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 11:00:00] [Long1_4] Entry=29549.75 SL=29499.25 Risk=50.5
+[27.08.2026 11:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[2]
+[27.08.2026 11:00:00] [Long1_5] Window R:R=1
+[27.08.2026 11:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 11:00:00] [Long1_5] Entry=29549.75 SL=29499.25 Risk=50.5
+[27.08.2026 11:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[2]
+[27.08.2026 11:00:00] [Long1_6] Window R:R=1
+[27.08.2026 11:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 11:00:00] [Long1_6] Entry=29549.75 SL=29499.25 Risk=50.5
+[27.08.2026 11:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[2]
+[27.08.2026 11:00:27] [Long1_2] 🚀 Entry FILLED at 29549.75 - Submitting STOP-LIMIT immediately
+[27.08.2026 11:00:27] [Long1_2]    Stop=29499.25, Limit=29499.25, Risk=50.5
+[Long1_1] ⚠️ releasing an unbacked InPosition reservation to Free. Broker state says flat with no live order, so the seat is available again.
+[27.08.2026 11:30:00] [Long1_2] 1R reached: Bar Close=29657, Target=29600.25
+[27.08.2026 11:30:00] [Long1_2] Limit order submitted @ 29657.25 (target=29600.25, offset=1 ticks, signal=RR_Limit_2)
+[27.08.2026 12:00:00] [Long1_1] Window R:R=1
+[27.08.2026 12:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:00:00] [Long1_1] Entry=29661.25 SL=29612 Risk=49.25
+[27.08.2026 12:00:00] [Long1_1] ✅ routed here — selected; headroom=3287.56; winners=[1]; book 1:3287.56(Pending) 2:2694.58 6:2227.41 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 12:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29661.25 (new routed signal)
+[27.08.2026 12:00:00] [Long1_2] Window R:R=1
+[27.08.2026 12:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:00:00] [Long1_2] Entry=29661.25 SL=29612 Risk=49.25
+[27.08.2026 12:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2694.58; winners=[1]
+[27.08.2026 12:00:00] [Long1_3] Window R:R=1
+[27.08.2026 12:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:00:00] [Long1_3] Entry=29661.25 SL=29612 Risk=49.25
+[27.08.2026 12:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[1]
+[27.08.2026 12:00:00] [Long1_4] Window R:R=1
+[27.08.2026 12:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:00:00] [Long1_4] Entry=29661.25 SL=29612 Risk=49.25
+[27.08.2026 12:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[1]
+[27.08.2026 12:00:00] [Long1_5] Window R:R=1
+[27.08.2026 12:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:00:00] [Long1_5] Entry=29661.25 SL=29612 Risk=49.25
+[27.08.2026 12:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[1]
+[27.08.2026 12:00:00] [Long1_6] Window R:R=1
+[27.08.2026 12:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:00:00] [Long1_6] Entry=29661.25 SL=29612 Risk=49.25
+[27.08.2026 12:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[1]
+[27.08.2026 12:30:00] [Long1_1] Window R:R=1
+[27.08.2026 12:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:30:00] [Long1_1] Entry=29634 SL=29567 Risk=67
+[27.08.2026 12:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29634 (re-priced working entry)
+[27.08.2026 12:30:00] [Long1_2] Window R:R=1
+[27.08.2026 12:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:30:00] [Long1_2] Entry=29634 SL=29567 Risk=67
+[27.08.2026 12:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2694.58; winners=[none]
+[27.08.2026 12:30:00] [Long1_3] Window R:R=1
+[27.08.2026 12:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:30:00] [Long1_3] Entry=29634 SL=29567 Risk=67
+[27.08.2026 12:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 12:30:00] [Long1_4] Window R:R=1
+[27.08.2026 12:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:30:00] [Long1_4] Entry=29634 SL=29567 Risk=67
+[27.08.2026 12:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 12:30:00] [Long1_5] Window R:R=1
+[27.08.2026 12:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:30:00] [Long1_5] Entry=29634 SL=29567 Risk=67
+[27.08.2026 12:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 12:30:00] [Long1_6] Window R:R=1
+[27.08.2026 12:30:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 12:30:00] [Long1_6] Entry=29634 SL=29567 Risk=67
+[27.08.2026 12:30:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 13:30:00] [Long1_1] Window R:R=1
+[27.08.2026 13:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 13:30:00] [Long1_1] Entry=29606.75 SL=29576 Risk=30.75
+[27.08.2026 13:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29606.75 (re-priced working entry)
+[27.08.2026 13:30:00] [Long1_2] Window R:R=1
+[27.08.2026 13:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 13:30:00] [Long1_2] Entry=29606.75 SL=29576 Risk=30.75
+[27.08.2026 13:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2694.58; winners=[none]
+[27.08.2026 13:30:00] [Long1_3] Window R:R=1
+[27.08.2026 13:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 13:30:00] [Long1_3] Entry=29606.75 SL=29576 Risk=30.75
+[27.08.2026 13:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 13:30:00] [Long1_4] Window R:R=1
+[27.08.2026 13:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 13:30:00] [Long1_4] Entry=29606.75 SL=29576 Risk=30.75
+[27.08.2026 13:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 13:30:00] [Long1_5] Window R:R=1
+[27.08.2026 13:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 13:30:00] [Long1_5] Entry=29606.75 SL=29576 Risk=30.75
+[27.08.2026 13:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 13:30:00] [Long1_6] Window R:R=1
+[27.08.2026 13:30:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 13:30:00] [Long1_6] Entry=29606.75 SL=29576 Risk=30.75
+[27.08.2026 13:30:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 14:00:07] [Long1_1] 🚀 Entry FILLED at 29606 - Submitting STOP-LIMIT immediately
+[27.08.2026 14:00:07] [Long1_1]    Stop=29576, Limit=29576, Risk=30
+[27.08.2026 14:30:00] [Long1_1] Window R:R=1
+[27.08.2026 14:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 14:30:00] [Long1_1] Entry=29630.25 SL=29569 Risk=61.25
+[27.08.2026 14:30:00] [Long1_1] ✅ routed here — selected; headroom=3226.54; winners=[1]; book 1:3226.54(Pending) 2:2694.58 6:2227.41 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 14:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29630.25 (new routed signal)
+[27.08.2026 14:30:00] [Long1_2] Window R:R=1
+[27.08.2026 14:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 14:30:00] [Long1_2] Entry=29630.25 SL=29569 Risk=61.25
+[27.08.2026 14:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2694.58; winners=[1]
+[27.08.2026 14:30:00] [Long1_3] Window R:R=1
+[27.08.2026 14:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 14:30:00] [Long1_3] Entry=29630.25 SL=29569 Risk=61.25
+[27.08.2026 14:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[1]
+[27.08.2026 14:30:00] [Long1_4] Window R:R=1
+[27.08.2026 14:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 14:30:00] [Long1_4] Entry=29630.25 SL=29569 Risk=61.25
+[27.08.2026 14:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[1]
+[27.08.2026 14:30:00] [Long1_5] Window R:R=1
+[27.08.2026 14:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 14:30:00] [Long1_5] Entry=29630.25 SL=29569 Risk=61.25
+[27.08.2026 14:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[1]
+[27.08.2026 14:30:00] [Long1_6] Window R:R=1
+[27.08.2026 14:30:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 14:30:00] [Long1_6] Entry=29630.25 SL=29569 Risk=61.25
+[27.08.2026 14:30:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[1]
+[27.08.2026 15:00:00] [Long1_1] Window R:R=1
+[27.08.2026 15:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 15:00:00] [Long1_1] Entry=29588.5 SL=29514.5 Risk=74
+[27.08.2026 15:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29588.5 (re-priced working entry)
+[27.08.2026 15:00:00] [Long1_2] Window R:R=1
+[27.08.2026 15:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 15:00:00] [Long1_2] Entry=29588.5 SL=29514.5 Risk=74
+[27.08.2026 15:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2694.58; winners=[none]
+[27.08.2026 15:00:00] [Long1_3] Window R:R=1
+[27.08.2026 15:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 15:00:00] [Long1_3] Entry=29588.5 SL=29514.5 Risk=74
+[27.08.2026 15:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 15:00:00] [Long1_4] Window R:R=1
+[27.08.2026 15:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 15:00:00] [Long1_4] Entry=29588.5 SL=29514.5 Risk=74
+[27.08.2026 15:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 15:00:00] [Long1_5] Window R:R=1
+[27.08.2026 15:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 15:00:00] [Long1_5] Entry=29588.5 SL=29514.5 Risk=74
+[27.08.2026 15:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 15:00:00] [Long1_6] Window R:R=1
+[27.08.2026 15:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 15:00:00] [Long1_6] Entry=29588.5 SL=29514.5 Risk=74
+[27.08.2026 15:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[none]
+[27.08.2026 15:12:49] [Long1_1] 🚀 Entry FILLED at 29588.5 - Submitting STOP-LIMIT immediately
+[27.08.2026 15:12:49] [Long1_1]    Stop=29514.5, Limit=29514.5, Risk=74
+[27.08.2026 16:00:00] [Long1_2] Window R:R=1
+[27.08.2026 16:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 16:00:00] [Long1_2] Entry=29581.5 SL=29516 Risk=65.5
+[27.08.2026 16:00:00] [Long1_2] ✅ routed here — selected; headroom=2694.58; winners=[2]; book 1:3096.03(InPosition) 2:2694.58(Pending) 6:2227.41 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 16:00:00] [Long1_2] Submitted BUY STOP-LIMIT @ 29581.5 (new routed signal)
+[27.08.2026 16:00:00] [Long1_3] Window R:R=1
+[27.08.2026 16:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 16:00:00] [Long1_3] Entry=29581.5 SL=29516 Risk=65.5
+[27.08.2026 16:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[2]
+[27.08.2026 16:00:00] [Long1_4] Window R:R=1
+[27.08.2026 16:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 16:00:00] [Long1_4] Entry=29581.5 SL=29516 Risk=65.5
+[27.08.2026 16:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[2]
+[27.08.2026 16:00:00] [Long1_5] Window R:R=1
+[27.08.2026 16:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 16:00:00] [Long1_5] Entry=29581.5 SL=29516 Risk=65.5
+[27.08.2026 16:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[2]
+[27.08.2026 16:00:00] [Long1_6] Window R:R=1
+[27.08.2026 16:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 16:00:00] [Long1_6] Entry=29581.5 SL=29516 Risk=65.5
+[27.08.2026 16:00:00] [Long1_6] ↪ not routed here — not selected; headroom=2227.41; winners=[2]
+[27.08.2026 16:30:48] [Long1_2] 🚀 Entry FILLED at 29581.5 - Submitting STOP-LIMIT immediately
+[27.08.2026 16:30:48] [Long1_2]    Stop=29516, Limit=29516, Risk=65.5
+[Long1_1] ⚠️ seat is InPosition but the account and strategy are both flat with no live order of ours; will release the reservation if this persists
+[27.08.2026 17:00:00] [Long1_1] Window R:R=1
+[27.08.2026 17:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 17:00:00] [Long1_1] Entry=29605 SL=29424 Risk=181
+[27.08.2026 17:00:00] [Long1_1] ↪ not routed here — not selected; headroom=3077.52; winners=[6]
+[Long1_2] ⚠️ seat is InPosition but the account and strategy are both flat with no live order of ours; will release the reservation if this persists
+[27.08.2026 17:00:00] [Long1_2] Window R:R=1
+[27.08.2026 17:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 17:00:00] [Long1_2] Entry=29605 SL=29424 Risk=181
+[27.08.2026 17:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2566.06; winners=[6]
+[27.08.2026 17:00:00] [Long1_3] Window R:R=1
+[27.08.2026 17:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 17:00:00] [Long1_3] Entry=29605 SL=29424 Risk=181
+[27.08.2026 17:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[6]
+[27.08.2026 17:00:00] [Long1_4] Window R:R=1
+[27.08.2026 17:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 17:00:00] [Long1_4] Entry=29605 SL=29424 Risk=181
+[27.08.2026 17:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[6]
+[27.08.2026 17:00:00] [Long1_5] Window R:R=1
+[27.08.2026 17:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 17:00:00] [Long1_5] Entry=29605 SL=29424 Risk=181
+[27.08.2026 17:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[6]
+[27.08.2026 17:00:00] [Long1_6] Window R:R=1
+[27.08.2026 17:00:00] [Long1_6] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 17:00:00] [Long1_6] Entry=29605 SL=29424 Risk=181
+[27.08.2026 17:00:00] [Long1_6] ✅ routed here — selected; headroom=2227.41; winners=[6]; book 1:3077.52(InPosition) 2:2566.06(InPosition) 6:2227.41(Pending) 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 17:00:00] [Long1_6] Submitted BUY STOP-LIMIT @ 29605 (new routed signal)
+[27.08.2026 17:28:34] [Long1_6] 🚀 Entry FILLED at 29605 - Submitting STOP-LIMIT immediately
+[27.08.2026 17:28:34] [Long1_6]    Stop=29424, Limit=29424, Risk=181
+[Long1_1] ⚠️ releasing an unbacked InPosition reservation to Free. Broker state says flat with no live order, so the seat is available again.
+[Long1_2] ⚠️ releasing an unbacked InPosition reservation to Free. Broker state says flat with no live order, so the seat is available again.
+[27.08.2026 18:00:00] [Long1_1] Window R:R=1
+[27.08.2026 18:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:00:00] [Long1_1] Entry=29611 SL=29531.75 Risk=79.25
+[27.08.2026 18:00:00] [Long1_1] ✅ routed here — selected; headroom=3077.52; winners=[1]; book 1:3077.52(Pending) 2:2566.06 6:2211.90(InPosition) 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 18:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29611 (new routed signal)
+[27.08.2026 18:00:00] [Long1_2] Window R:R=1
+[27.08.2026 18:00:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:00:00] [Long1_2] Entry=29611 SL=29531.75 Risk=79.25
+[27.08.2026 18:00:00] [Long1_2] ↪ not routed here — not selected; headroom=2566.06; winners=[1]
+[27.08.2026 18:00:00] [Long1_3] Window R:R=1
+[27.08.2026 18:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:00:00] [Long1_3] Entry=29611 SL=29531.75 Risk=79.25
+[27.08.2026 18:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[1]
+[27.08.2026 18:00:00] [Long1_4] Window R:R=1
+[27.08.2026 18:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:00:00] [Long1_4] Entry=29611 SL=29531.75 Risk=79.25
+[27.08.2026 18:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[1]
+[27.08.2026 18:00:00] [Long1_5] Window R:R=1
+[27.08.2026 18:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:00:00] [Long1_5] Entry=29611 SL=29531.75 Risk=79.25
+[27.08.2026 18:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[1]
+[27.08.2026 18:01:51] [Long1_1] 🚀 Entry FILLED at 29611 - Submitting STOP-LIMIT immediately
+[27.08.2026 18:01:51] [Long1_1]    Stop=29531.75, Limit=29531.75, Risk=79.25
+[27.08.2026 18:30:00] [Long1_2] Window R:R=1
+[27.08.2026 18:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:30:00] [Long1_2] Entry=29634.5 SL=29573 Risk=61.5
+[27.08.2026 18:30:00] [Long1_2] ✅ routed here — selected; headroom=2566.06; winners=[2]; book 1:3006.01(InPosition) 2:2566.06(Pending) 6:2167.90(InPosition) 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 18:30:00] [Long1_2] Submitted BUY STOP-LIMIT @ 29634.5 (new routed signal)
+[27.08.2026 18:30:00] [Long1_3] Window R:R=1
+[27.08.2026 18:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:30:00] [Long1_3] Entry=29634.5 SL=29573 Risk=61.5
+[27.08.2026 18:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[2]
+[27.08.2026 18:30:00] [Long1_4] Window R:R=1
+[27.08.2026 18:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:30:00] [Long1_4] Entry=29634.5 SL=29573 Risk=61.5
+[27.08.2026 18:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[2]
+[27.08.2026 18:30:00] [Long1_5] Window R:R=1
+[27.08.2026 18:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 18:30:00] [Long1_5] Entry=29634.5 SL=29573 Risk=61.5
+[27.08.2026 18:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[2]
+[Long1_1] ⚠️ seat is InPosition but the account and strategy are both flat with no live order of ours; will release the reservation if this persists
+[Long1_1] ⚠️ releasing an unbacked InPosition reservation to Free. Broker state says flat with no live order, so the seat is available again.
+[27.08.2026 19:38:01] [Long1_2] 🚀 Entry FILLED at 29634.5 - Submitting STOP-LIMIT immediately
+[27.08.2026 19:38:01] [Long1_2]    Stop=29573, Limit=29573, Risk=61.5
+[27.08.2026 20:30:00] [Long1_1] Window R:R=1
+[27.08.2026 20:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 20:30:00] [Long1_1] Entry=29678.25 SL=29637.75 Risk=40.5
+[27.08.2026 20:30:00] [Long1_1] ✅ routed here — selected; headroom=2918.00; winners=[1]; book 1:2918.00(Pending) 2:2579.05(InPosition) 6:2299.90(InPosition) 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 20:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29678.25 (new routed signal)
+[27.08.2026 20:30:00] [Long1_3] Window R:R=1
+[27.08.2026 20:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 20:30:00] [Long1_3] Entry=29678.25 SL=29637.75 Risk=40.5
+[27.08.2026 20:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[1]
+[27.08.2026 20:30:00] [Long1_4] Window R:R=1
+[27.08.2026 20:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 20:30:00] [Long1_4] Entry=29678.25 SL=29637.75 Risk=40.5
+[27.08.2026 20:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[1]
+[27.08.2026 20:30:00] [Long1_5] Window R:R=1
+[27.08.2026 20:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 20:30:00] [Long1_5] Entry=29678.25 SL=29637.75 Risk=40.5
+[27.08.2026 20:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[1]
+[27.08.2026 21:00:00] [Long1_1] Window R:R=1
+[27.08.2026 21:00:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:00:00] [Long1_1] Entry=29659 SL=29606.75 Risk=52.25
+[27.08.2026 21:00:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29659 (re-priced working entry)
+[27.08.2026 21:00:00] [Long1_3] Window R:R=1
+[27.08.2026 21:00:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:00:00] [Long1_3] Entry=29659 SL=29606.75 Risk=52.25
+[27.08.2026 21:00:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 21:00:00] [Long1_4] Window R:R=1
+[27.08.2026 21:00:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:00:00] [Long1_4] Entry=29659 SL=29606.75 Risk=52.25
+[27.08.2026 21:00:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 21:00:00] [Long1_5] Window R:R=1
+[27.08.2026 21:00:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:00:00] [Long1_5] Entry=29659 SL=29606.75 Risk=52.25
+[27.08.2026 21:00:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 21:30:00] [Long1_1] Window R:R=1
+[27.08.2026 21:30:00] [Long1_1] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:30:00] [Long1_1] Entry=29622.25 SL=29526.5 Risk=95.75
+[27.08.2026 21:30:00] [Long1_1] Submitted BUY STOP-LIMIT @ 29622.25 (re-priced working entry)
+[27.08.2026 21:30:00] [Long1_2] Window R:R=1
+[27.08.2026 21:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:30:00] [Long1_2] Entry=29622.25 SL=29526.5 Risk=95.75
+[27.08.2026 21:30:00] [Long1_2] ↪ not routed here — not selected; headroom=2393.00; winners=[none]
+[27.08.2026 21:30:00] [Long1_3] Window R:R=1
+[27.08.2026 21:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:30:00] [Long1_3] Entry=29622.25 SL=29526.5 Risk=95.75
+[27.08.2026 21:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[none]
+[27.08.2026 21:30:00] [Long1_4] Window R:R=1
+[27.08.2026 21:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:30:00] [Long1_4] Entry=29622.25 SL=29526.5 Risk=95.75
+[27.08.2026 21:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[none]
+[27.08.2026 21:30:00] [Long1_5] Window R:R=1
+[27.08.2026 21:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 21:30:00] [Long1_5] Entry=29622.25 SL=29526.5 Risk=95.75
+[27.08.2026 21:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[none]
+[27.08.2026 22:34:15] [Long1_1] 🚀 Entry FILLED at 29622.25 - Submitting STOP-LIMIT immediately
+[27.08.2026 22:34:15] [Long1_1]    Stop=29526.5, Limit=29526.5, Risk=95.75
+Strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203023' lost price connection but will keep running.
+Strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203021' lost price connection but will keep running.
+Strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203022' lost price connection but will keep running.
+Strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203024' lost price connection but will keep running.
+Strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203019' lost price connection but will keep running.
+Strategy 'RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted/250203020' lost price connection but will keep running.
+[27.08.2026 23:30:00] [Long1_2] Window R:R=1
+[27.08.2026 23:30:00] [Long1_2] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 23:30:00] [Long1_2] Entry=29694.25 SL=29634.25 Risk=60
+[27.08.2026 23:30:00] [Long1_2] ✅ routed here — selected; headroom=2393.00; winners=[2]; book 1:2950.49(InPosition) 2:2393.00(Pending) 6:2295.40(InPosition) 4:1810.77 5:1542.25 3:296.15
+[27.08.2026 23:30:00] [Long1_2] Submitted BUY STOP-LIMIT @ 29694.25 (new routed signal)
+[27.08.2026 23:30:00] [Long1_3] Window R:R=1
+[27.08.2026 23:30:00] [Long1_3] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 23:30:00] [Long1_3] Entry=29694.25 SL=29634.25 Risk=60
+[27.08.2026 23:30:00] [Long1_3] ↪ not routed here — not selected; headroom=296.15; winners=[2]
+[27.08.2026 23:30:00] [Long1_4] Window R:R=1
+[27.08.2026 23:30:00] [Long1_4] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 23:30:00] [Long1_4] Entry=29694.25 SL=29634.25 Risk=60
+[27.08.2026 23:30:00] [Long1_4] ↪ not routed here — not selected; headroom=1810.77; winners=[2]
+[27.08.2026 23:30:00] [Long1_5] Window R:R=1
+[27.08.2026 23:30:00] [Long1_5] 🔴 Red candle detected -> evaluating entry
+[27.08.2026 23:30:00] [Long1_5] Entry=29694.25 SL=29634.25 Risk=60
+[27.08.2026 23:30:00] [Long1_5] ↪ not routed here — not selected; headroom=1542.25; winners=[2]

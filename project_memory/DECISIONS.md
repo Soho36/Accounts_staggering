@@ -205,10 +205,11 @@ and only to a listed id.
 **Alternatives:** a blanket boolean (tried first).
 **Why rejected:** a blanket bypass would silently ignore a *future* orphan that
 was genuinely live, letting a seat start and duplicate exposure.
-**Also:** the id is written to `blocked_orders_<BOOK>.csv` the moment the
-interlock fires, because the Output window is volatile and losing the id would
-leave deleting `db\NinjaTrader.sqlite` as the only route — which destroys order
-and trade history for every account. **Never do that to clear one stale record.**
+**Also:** the router attempts to write the id to `blocked_orders_<BOOK>.csv` the
+moment the interlock fires, because the Output window is volatile. A disk failure
+must never weaken the interlock. The current write-failure reporting gap is
+tracked in `STATE.md` / `TODO.md`. **Never delete `db\NinjaTrader.sqlite` to clear
+one stale record** — that destroys order and trade history for every account.
 **Leave acknowledged ids in place** until startup reports they no longer match;
 the record does not clear on restart, so removing one re-blocks the seat.
 

@@ -52,19 +52,27 @@ Responsibilities:
 
 ### `RR_..._SafeExits_Routed.cs` — the strategy
 
-The original strategy plus a routing gate and state publishing. Derived from
+The original strategy plus routing, lifecycle reconciliation and diagnostics.
+Derived from
 `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits(EXAMPLE).cs`
 in the repo root, which is the untouched reference.
 
-Order semantics preserved exactly: latest-red-candle stop-limit entry re-priced
-**in place**, candle-low zero-band stop-limit protection, bar-close take-profit
-limit. One instance per chart per account; all order names carry the Instance ID.
+Core order flow is preserved: latest-red-candle stop-limit entry re-priced **in
+place**, candle-low zero-band stop-limit protection and bar-close take-profit
+limit. Known deliberate divergences are the gap-skipped-candle setup fix and
+emergency exits when no valid protective setup/order can be established; see
+`DECISIONS.md` and `nt8/README.md`. One instance runs per chart/account and all
+order names carry the Instance ID.
 
-Three insertion points only:
-1. `RegisterSeat()` / `ReleaseSeat()` in `OnStateChange`.
-2. `PublishEquity()` / `PublishStatus()` on account, order, execution and bar events.
-3. `MayEnter()` — the routing gate, placed **after** every local disqualifier
-   (window, R:R, gap) so a seat that would refuse anyway never consumes a slot.
+Main integration responsibilities:
+1. Startup preflight, orphan acknowledgement and `RegisterSeat()` / `ReleaseSeat()`.
+2. Equity/status publication on account, market-data, order, execution, position
+   and bar callbacks.
+3. `MayEnter()` — the routing gate, placed **after** local disqualifiers (window,
+   R:R, gap) so a seat that would refuse anyway never consumes a slot.
+4. Per-order entry-setup binding and fill resolution using the execution order's
+   reported limit/stop price, including price-improved fills.
+5. Broker-state reconciliation for stranded `Pending` / `InPosition` states.
 
 ### Seat state machine
 
@@ -81,9 +89,14 @@ Free ──wins claim──> Pending ──fills──> InPosition ──closes�
 `InPosition` not consuming R is why overlapping signals produce more than R open
 contracts, and why `K > R`. Detail in `nt8/ROUTER_LOGIC.md`.
 
-Both non-`Free` states **self-heal**: each bar, if broker state proves flat with
-no live order of ours, the seat is released after a grace period. Necessary
-because both were one-way latches that silently disarmed the whole book.
+Both non-`Free` states **self-heal**: on bar callbacks, if broker and strategy
+state prove flat with no live order of ours, the seat is released after at least
+30 seconds. The wall-clock grace still needs a later bar callback, so on a
+30-minute series recovery can take roughly 30–60 minutes. This is necessary
+because both states previously became one-way latches that silently disarmed the
+whole book. Current exception: the runtime order scan still treats a specifically
+acknowledged `Unknown` orphan as live, even though startup permits it; see
+`STATE.md` / `TODO.md`.
 
 ## Tooling (`nt8/`, run locally, never inside NinjaTrader)
 
@@ -99,7 +112,7 @@ because both were one-way latches that silently disarmed the whole book.
 |---|---|---|
 | `peaks_<BOOK>.csv` | seeded by tool, maintained by router | high-water marks; the router only selects seats seeded from here |
 | `routing_<BOOK>_<yyyymmdd>.csv` | router | one row per seat per decision — the analysis record |
-| `blocked_orders_<BOOK>.csv` | router | ids of orders that blocked a startup, so they survive the Output window |
+| `blocked_orders_<BOOK>.csv` | router | best-effort audit of ids that blocked startup, so they can survive the Output window; disk failure never weakens the interlock |
 
 The Book ID is the filename stem of the peak file. A different Book ID looks for
 a different file, finds nothing, and every seat reports `PEAK NOT SEEDED`.

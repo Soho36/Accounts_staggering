@@ -138,10 +138,13 @@ identity `change in headroom = change in equity - change in floor`.
 
 ## Things that ARE worth investigating
 
-- A fill whose printed `Stop=` does not match the most recent red candle's `SL`.
+- A fill whose printed `Stop=` does not match the candle identified by the
+  execution order's reported limit/stop price.
 - Any `⚠️ bound setup was stale` or `⛔ cannot identify the candle` line.
-- `⚠️ releasing an unbacked Pending reservation` — means a submission never
-  reached the broker.
+- `⚠️ releasing an unbacked Pending reservation` — normally means a submission
+  never reached the broker.
+- `⚠️ releasing an unbacked InPosition reservation` — means the cached latch
+  disagreed with flat broker/strategy state and needs root-cause investigation.
 - `⛔ PEAK NOT SEEDED` on any seat.
 - `⛔ STARTUP INTERLOCK` on any seat — it disarms the whole book, not just that seat.
 
@@ -199,10 +202,10 @@ give-back is the fastest way to burn a container without losing a single trade.
 ## Orphaned orders after a crash
 
 If the machine hangs or NinjaTrader dies with a working entry order, NT8 may keep
-a record of that order in state **`Unknown`** - it could not reconcile it. That
-record is **permanent**: it cannot be cancelled (the real order is gone), it does
-not clear on restart, and re-seeding the peak file does nothing, because this has
-nothing to do with peaks:
+a record of that order in state **`Unknown`** - it could not reconcile it. Such a
+record can persist across ordinary restarts and cannot be cancelled when the real
+order is gone. Re-seeding the peak file does nothing, because this has nothing to
+do with peaks:
 
 ```
 [Long1_1] STARTUP INTERLOCK - existing non-terminal order 'Long1_1' (Unknown)
@@ -212,17 +215,18 @@ nothing to do with peaks:
 **One blocked seat stops the entire book.** The other five register and seed
 normally, but quorum needs all six, so nothing trades anywhere.
 
-The id is **saved automatically** the moment the interlock fires, to
+The router makes a best-effort attempt to save the id when the interlock fires,
+to
 
 ```
 Documents\NinjaTrader 8\PropRouter\blocked_orders_<BOOK>.csv
 ```
 
-one row per order, so losing the Output window does not lose the id. The
-interlock message names that path too. Without it the only remaining route would
-be deleting `db\NinjaTrader.sqlite`, which rebuilds NinjaTrader's database and
-destroys the order, execution and trade history for every account - never do that
-to recover one stale record.
+one row per order. Verify that the row actually exists before relying on it: a
+current diagnostic bug can print the intended path even if the write failed.
+Without a saved id, recover it from NinjaTrader/the broker records; never delete
+`db\NinjaTrader.sqlite`, which rebuilds the database and destroys order,
+execution and trade history for every account.
 
 To clear it:
 
@@ -272,6 +276,10 @@ The bypass is deliberately narrow. It applies only to state `Unknown`, only when
 the account position is flat, only to an id you listed, and never to an order in
 a genuinely live state such as `Working` or `Accepted`. It is not part of the book
 manifest, so setting it on one chart does not force the other five to match.
+
+Current source limitation: this rule is applied by startup validation, but the
+runtime self-heal scan still counts the acknowledged `Unknown` record as live.
+Until the TODO is fixed, that record can prevent a stranded status from healing.
 
 ## Shutting down with open positions
 

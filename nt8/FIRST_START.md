@@ -249,9 +249,10 @@ Before any wider test, observe one complete controlled sequence:
 2. While it is working, a newer valid red candle changes that same managed order
    in place. Confirm there is no cancel/resubmit gap and no additional router
    claim.
-3. Exercise a fill around the change callback. Confirm a fill at the old or new
-   entry price uses the setup belonging to that entry price, never an unrelated
-   recent candle.
+3. Exercise a fill around the change callback, including price improvement.
+   Confirm the setup is selected from the execution order's reported limit/stop
+   price, not the possibly better fill price, and never from an unrelated recent
+   candle.
 4. Form a gap-skipped red candle whose high has already been reached. Confirm it
    neither changes the working order nor overwrites its stop/R:R. The older order
    remains available to fill with its own valid setup.

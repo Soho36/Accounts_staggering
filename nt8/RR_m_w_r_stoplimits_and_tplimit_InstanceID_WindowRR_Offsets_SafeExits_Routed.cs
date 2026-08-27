@@ -16,9 +16,9 @@ using System.Text;
 // -----------------------------------------------------------------------------
 // Routed variant of RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExits.
 //
-// The original strategy plus a routing gate, and deliberately little else. Fill
-// behaviour must match what signal_router.py measured, so nothing may suppress an
-// entry the original would have taken:
+// The original strategy plus routing, lifecycle reconciliation and diagnostics.
+// Fill behaviour must match what signal_router.py measured, so nothing may
+// suppress an entry the original would have taken:
 //
 //   * RealtimeErrorHandling stays IgnoreAllErrors, as in the original.
 //   * A new red candle re-prices the working entry IN PLACE (managed API), so an
@@ -27,9 +27,11 @@ using System.Text;
 //     router claim, a one-time startup preflight, and the book quorum.
 //   * End-of-session flattening is NinjaTrader's built-in handling only.
 //
-// Order semantics preserved exactly: latest-red-candle stop-limit entry, zero-band
-// candle-low stop-limit protection, bar-close take-profit limit.
-// The zero-band protective stop-limit remains a live-release blocker in README.md.
+// Core order flow is preserved: latest-red-candle stop-limit entry, zero-band
+// candle-low stop-limit protection, bar-close take-profit limit. Deliberate
+// divergences are documented in project_memory/DECISIONS.md and README.md,
+// notably the gap-skipped-candle setup fix and emergency invalid-setup exits.
+// The zero-band protective stop-limit remains a live-release blocker.
 //
 // Requires: bin\Custom\AddOns\PropRouter.cs
 // -----------------------------------------------------------------------------
@@ -997,6 +999,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        /// <summary>
+        /// Reads flatness from BOTH position views live, rather than trusting the cached
+        /// strategyPositionFlat flag. That flag is only ever set by OnPositionUpdate, so if
+        /// that callback does not land as expected the seat latches InPosition forever and
+        /// silently removes itself from allocation. Observed repeatedly after a take-profit
+        /// exit, where the protective stop is mid-cancel when the fill callback arrives.
+        /// </summary>
+        private bool IsFlatEverywhere()
+        {
+            try
+            {
+                bool strategyFlat = Position == null
+                    || Position.MarketPosition == MarketPosition.Flat;
+                bool accountFlat = PositionAccount == null
+                    || PositionAccount.MarketPosition == MarketPosition.Flat;
+                return strategyFlat && accountFlat;
+            }
+            catch { return false; }     // cannot prove flat - stay reserved
+        }
+
         private void PublishStatus()
         {
             if (!routerRegistered)
@@ -1007,10 +1029,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Account truth may conservatively upgrade a seat, including after a
                 // manual/external fill. Heartbeats never infer Free and therefore cannot
                 // erase a Pending/InPosition reservation with a stale snapshot.
-                if (PositionAccount != null && PositionAccount.MarketPosition != MarketPosition.Flat)
+                if (!IsFlatEverywhere())
                     routerSeatStatus = SeatStatus.InPosition;
-                else if (strategyPositionFlat && routerSeatStatus == SeatStatus.InPosition
-                    && !HasActiveExitOrders())
+                else if (routerSeatStatus == SeatStatus.InPosition && !HasActiveExitOrders())
                     routerSeatStatus = SeatStatus.Free;
                 PublishStatusLocked();
             }
@@ -1058,12 +1079,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             lock (routerStatusSync)
             {
-                if (!strategyPositionFlat)
+                if (!IsFlatEverywhere())
                     routerSeatStatus = SeatStatus.InPosition;
                 else if (routerSeatStatus != SeatStatus.Pending)
                     routerSeatStatus = HasActiveExitOrders()
-                        || (PositionAccount != null
-                            && PositionAccount.MarketPosition != MarketPosition.Flat)
                         ? SeatStatus.InPosition : SeatStatus.Free;
 
                 PublishStatusLocked();
@@ -1280,16 +1299,16 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         /// <summary>
-        /// Picks the setup that actually belongs to this fill, identified by PRICE rather
-        /// than by binding order.
+        /// Picks the setup that actually belongs to this fill, identified primarily by the
+        /// execution ORDER's reported price rather than by binding order or fill price.
         ///
-        /// A stop-limit entry fills at its own stop/limit price, so the candle whose entry
-        /// price equals the fill price is the candle that filled. That test survives the
-        /// two races the binding cannot: a synchronous fill during submission (the binding
-        /// has not been rewritten yet) and a re-price the broker never applied (the binding
-        /// has been rewritten too early).
+        /// A buy stop-limit can fill at its limit or better, so the fill price itself may not
+        /// equal the candle high. The order's reported limit/stop price identifies the setup
+        /// while surviving the two races the binding cannot: a synchronous fill during
+        /// submission (the binding has not been rewritten yet) and a re-price the broker
+        /// never applied (the binding has been rewritten too early).
         ///
-        /// If no candle matches the fill price, the trade is NOT reconstructed from an
+        /// If no candle matches the order price, the trade is NOT reconstructed from an
         /// unrelated candle - that would create a position with a stop and R:R target
         /// belonging to neither the original strategy nor the exported data. The caller
         /// falls through to the emergency market exit instead.
@@ -1733,7 +1752,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 strategyPositionFlat = marketPosition == MarketPosition.Flat;
 
-                if (!strategyPositionFlat)
+                if (!strategyPositionFlat || !IsFlatEverywhere())
                 {
                     routerSeatStatus = SeatStatus.InPosition;
                 }

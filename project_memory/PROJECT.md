@@ -32,7 +32,7 @@ from the allocation decision rather than from trading more.
 - Live routing must reproduce `addiotional_helpers/signal_router.py` decisions
   exactly, given the same seat states.
 - Nothing may suppress an entry the original strategy would have taken, beyond
-  the router's own allocation decision.
+  the router claim, the one-time startup interlock and the full-book quorum.
 
 ## Key measured facts
 
@@ -87,6 +87,6 @@ from the allocation decision rather than from trading more.
 
 ## Status
 
-**Simulation / Playback prototype running against live accounts under
-observation.** Not certified live-ready; see `nt8/README.md` for the release
-gate and `STATE.md` for what currently blocks it.
+**Live-observation prototype, not certified live-ready.** The repository cannot
+prove which source revision is compiled in NinjaTrader; see `STATE.md` for the
+last recorded operator state and `nt8/README.md` for the release gate.

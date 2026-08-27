@@ -18,6 +18,7 @@ accounts under close observation. The offline study is complete and unchanged.
 - Analysis: `routing_report.py` renders a routing log as a self-contained HTML
   session report.
 - Router regression suite: 15/15.
+- Python regression suite: 24/24.
 
 **Live book seats** (drawdowns are non-uniform):
 
@@ -35,14 +36,17 @@ accounts at 100000 start.
 
 ## Current work
 
-Three fixes are **in source but not yet compiled or validated live**:
+Three fixes are verified in source and local checks, but the repository cannot
+prove whether the current NinjaTrader process has compiled them or whether they
+have passed live validation:
 
 1. `InPosition` / `Pending` self-heal from broker state.
 2. Fill identified by the order's limit price rather than the fill price.
-3. `blocked_orders_<BOOK>.csv` — orphan ids persisted automatically.
+3. `blocked_orders_<BOOK>.csv` — best-effort orphan-id persistence.
 
-**The user must recompile in the NinjaScript Editor before any of these take
-effect.** Until then the seats register but re-latch after their first trade.
+**Confirm the deployed NinjaScript revision in the NinjaScript Editor and
+recompile if necessary before relying on them.** Until live confirmation, assume
+the running book may still exhibit the earlier latch behaviour.
 
 ## Known issues
 
@@ -53,6 +57,11 @@ effect.** Until then the seats register but re-latch after their first trade.
   around it by re-deriving status from broker state rather than trusting the
   cached flag. Watch for `⚠️ releasing an unbacked InPosition reservation`; if it
   appears, the latch is still forming.
+- *(confirmed source gap)* `HasLiveOrderOnAccount()` treats every `Unknown` order
+  as live, even when that exact id was accepted by the narrow startup orphan
+  acknowledgement. Instance 1's known orphan can therefore prevent its
+  `Pending` / `InPosition` self-heal until the stale record disappears. Startup
+  and runtime must apply the same flat + `Unknown` + exact-id rule.
 
 **Live-release blockers** (also listed in `nt8/README.md`)
 
@@ -69,6 +78,10 @@ effect.** Until then the seats register but re-latch after their first trade.
   26.08.2026 01:03:57) unless that id is present in *Acknowledged orphan order
   IDs* on its chart. It must stay there until startup reports it no longer
   matches. One blocked seat disarms the whole book.
+- `RecordBlockedOrder()` is best-effort. On an I/O failure it currently returns
+  the intended non-empty path, so the interlock text can incorrectly say the id
+  was saved. The interlock remains fail-closed, but the audit-file claim must be
+  verified on disk until this diagnostic bug is fixed.
 - `peaks_LIVE.csv` is no longer in the repo folder; the live copy in
   `Documents\NinjaTrader 8\PropRouter\` is authoritative.
 - `nt8/Broker_statement.csv` has been re-exported with fresh balances; a stale
@@ -76,8 +89,9 @@ effect.** Until then the seats register but re-latch after their first trade.
 
 ## Next steps
 
-1. Recompile in NinjaScript Editor; confirm all six seats register and that a
-   completed trade returns its seat to `Free`.
+1. Make the runtime order scan honor the same narrow acknowledged-orphan rule as
+   startup, then recompile in NinjaScript Editor. Confirm all six seats register
+   and that a completed trade returns its seat to `Free`.
 2. Run a full session and render it with `routing_report.py`; confirm no seat
    latches and no `⚠️`/`⛔` lines beyond the known orphan.
 3. Decide the `protect_frozen` question: seats 1 and 2 are frozen and

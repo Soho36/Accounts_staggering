@@ -251,10 +251,11 @@ strategy design:
    skipped candle's higher low to an older fill could produce a stop above entry
    and negative risk. It changes only this defective rare-path trade management,
    not whether the old order remains available to fill.
-4. On a fill/re-price race, the strategy first matches the fill price to the
-   recorded candle entry price. It never selects an arbitrary recent candle. If
-   no valid setup can be identified, it exits at market rather than inventing a
-   stop/R:R pair.
+4. On a fill/re-price race, the strategy matches the execution order's reported
+   limit/stop price to the recorded candle entry price. This remains correct when
+   the fill itself receives price improvement. It never selects an arbitrary
+   recent candle. If no valid setup can be identified, it exits at market rather
+   than inventing a stop/R:R pair.
 5. After entry, the loss exit remains the original sell stop-limit with equal
    stop and limit at the signal candle's low.
 6. The take-profit remains bar-close-driven. It is **not** a resting target
@@ -540,9 +541,9 @@ Output text separately when testing that mode.
 - **In-place re-pricing retains a broker race.** A newer valid red candle changes
   the managed working order with no cancel/resubmit gap. A fill can interleave
   with that change. The strategy associates the fill with a recorded setup by
-  entry price, falls back only to a self-consistent order binding, and exits at
-  market when it cannot identify a valid setup. Provider-specific Playback
-  testing remains mandatory.
+  the execution order's reported limit/stop price, falls back only to a
+  self-consistent order binding, and exits at market when it cannot identify a
+  valid setup. Provider-specific Playback testing remains mandatory.
 - **No open-position/order adoption.** Startup deliberately refuses an existing
   account position or this instance's non-terminal orders. It cannot recover
   their original stop/R:R state.
@@ -651,10 +652,11 @@ detail must show the expected fail-closed cause.
 - [ ] **In-place re-pricing:** leave red-candle A's entry working, then close a
   valid red candle B. Confirm the same managed entry is changed in place with no
   cancel/resubmit gap and no additional router claim.
-- [ ] **Re-price/fill race:** exercise fills at A's and B's entry prices around
-  the change callback. Confirm the selected stop and R:R come from the candle
-  whose entry price filled; an unidentifiable setup must cause the documented
-  emergency exit, never an arbitrary recent-candle fallback.
+- [ ] **Re-price/fill race:** exercise reported order prices A and B around the
+  change callback, including a price-improved fill below the reported buy-limit
+  price. Confirm the selected stop and R:R come from the candle matching the
+  execution order's reported price; an unidentifiable setup must cause the
+  documented emergency exit, never an arbitrary recent-candle fallback.
 - [ ] **Gap-skipped candle:** while A is working, form a red candle whose entry is
   already reached (`ask >= high`). Confirm no change request is sent, A remains
   working, and an eventual A fill keeps a valid A setup rather than the skipped
