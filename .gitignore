@@ -9,3 +9,6 @@
 nt8/__pycache__/
 /nt8/session_SIM_202608201.html
 /nt8/peaks_LIVE.csv.bak
+/.claude/
+/.codex/
+/nt8/Outputs_logs/
