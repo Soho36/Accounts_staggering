@@ -1,5 +1,14 @@
 # PROJECT
 
+## Workspace location
+
+The authoritative physical project location is
+`I:\PycharmProjects\Accounts_staggering\`. Some Windows tools and IDE metadata may
+show the compatibility/junction path
+`C:\Users\Liikurserv\PycharmProjects\Accounts_staggering\`; treat both as the same
+workspace and do not create or maintain a second checkout there. Prefer the `I:`
+path in commands, documentation and generated configuration.
+
 ## Objective
 
 Test whether **portfolio architecture** — how trading signals are allocated

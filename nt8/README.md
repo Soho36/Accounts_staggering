@@ -234,7 +234,7 @@ manual release check.
 
 There is no strategy-level 23:57 cutoff. End-of-session flattening and order
 cancellation are delegated to NinjaTrader's built-in
-`IsExitOnSessionCloseStrategy` handling, 30 seconds before the Trading Hours
+`IsExitOnSessionCloseStrategy` handling, 120 seconds before the Trading Hours
 template's session end. Test the exact BarsPeriod, template and global time zone
 in Playback; this is intentionally a minor difference from the checked-in
 original script.
@@ -247,8 +247,10 @@ account position and account order collection; if the external flatten is still
 in flight, it conservatively retains the reservation and tells the operator to
 verify flatness and restart. For deterministic ownership, configure the strategy
 session close to occur before account Auto Close with enough execution/callback
-margin. Changing either time changes the end-of-day exit and therefore requires a
-Playback comparison; it is not silently changed by this project.
+margin. The live operating choice is currently strategy close at 23:58 for a
+midnight session, followed by account Auto Close at 23:59 as the emergency
+backstop. Changing either time changes the end-of-day exit and therefore requires
+a Playback comparison.
 
 The following core order semantics are intentional and match the original
 strategy design:

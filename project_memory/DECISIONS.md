@@ -114,6 +114,15 @@ flow.
 **Reason:** The user does not use it, and on coarse bar series it never reliably
 fired anyway while still blocking entries.
 
+### 2026-08-28 — Strategy session close precedes account Auto Close
+
+**Decision:** Use NinjaTrader's built-in strategy session close 120 seconds before
+a midnight session (23:58); retain account Auto Close at 23:59 as a backstop.
+**Reason:** With the former 30-second lead, account Auto Close fired first,
+submitted `External` exits and disabled strategies during lifecycle callbacks.
+**Consequence:** End-of-day exit timing changes deliberately. Validate the new
+ordering in live logs; do not move Auto Close earlier than the strategy owner.
+
 ### 2026-08-24 — No in-session disarming
 
 **Decision:** Removed all runtime `startupBlocked` sites. The only things that may
@@ -165,6 +174,41 @@ verification is done offline by `make_peak_file.py --check` instead.
 **Reason:** Per-book state keeps a Playback book from writing into the live
 book's peaks. The charset restriction makes the filename sanitiser a no-op, so a
 Book ID can never silently map to a different filename.
+
+### 2026-08-28 — Live policy remains `max_headroom`, not `protect_frozen`
+
+**Decision:** Keep the NT8 selection key
+`(-headroom, trades_taken, instance_id)`, which is the selected
+`signal_router.py` `max_headroom` policy. `protect_frozen` remains a research
+alternative, not the reference implementation.
+**Reason:** The generated R=1/K=6 comparison gave `max_headroom` a holdout
+cashout of $17,609.60 versus $9,753.35 for `protect_frozen`, with zero versus
+three replacements; the five overlapping selection episodes also favored
+`max_headroom` ($960 median versus -$1,600). More importantly, retained profit on
+a frozen account is real headroom: if no payout is taken, avoiding that seat can
+push trades onto less-capitalized accounts.
+**Consequence:** Withdrawals are a separate operational/economic decision. A
+payout lowers current equity and therefore naturally lowers that seat's
+`max_headroom` priority; do not change the router merely to imitate a payout that
+has not occurred.
+
+### 2026-08-28 — Withdrawal policy must be evaluated inside fixed-R routing
+
+**Decision:** Do not apply an `account_farming.py` withdrawal winner directly to
+the live routed book. Extend the completed-trade routing simulator so withdrawals,
+cash and dynamic seat purchases run around the selected `max_headroom` allocator
+while R remains fixed.
+**Reason:** The scripts share `Rule`, `Harvest` and `step`, but their book runners
+answer different questions. `account_farming.run_book()` copies each trade to
+every live seat, so acquiring seats also raises exposure. `signal_router.py`
+separates R from K correctly, but starts with a fixed homogeneous K and uses
+withdrawals only to replace dead seats. Neither existing runner represents the
+current six mixed seats growing through payouts.
+**Consequence:** Withdrawal amount, retained cushion and purchase cadence must be
+optimized jointly with routed seat selection, current seat states, payout rules
+and actual offer availability. Intermittent Legacy offers are valid purchase
+opportunities and must be represented as time-varying inventory, not assumed
+always available or permanently unavailable.
 
 ---
 

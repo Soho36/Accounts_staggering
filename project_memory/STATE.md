@@ -48,9 +48,12 @@ race at 23:59. Current source now:
    explicit copy-the-id warning); and
 4. reconciles shutdown from account position/order truth when NinjaTrader flattens
    externally, without changing any entry, stop or profit-taking order rule.
+5. closes through NinjaTrader's strategy session-close handling 120 seconds before
+   midnight (23:58), leaving account Auto Close at 23:59 as the backstop. The user
+   has compiled and started this revision; end-of-session logs are pending.
 
-The router suite is green, but NinjaTrader must compile this revision and the
-next live/Playback session must confirm the lifecycle changes.
+The router suite is green and the user has compiled the current NinjaScript. The
+new live session must now confirm the lifecycle changes.
 
 ## Known issues
 
@@ -59,13 +62,9 @@ next live/Playback session must confirm the lifecycle changes.
 - *(needs live confirmation)* Whether live flatness derivation clears every stale
   `InPosition` / `Pending` latch. Watch for `⚠️ releasing an unbacked ...
   reservation`; that means a callback latch still formed but was recovered.
-- *(needs timing decision)* NinjaTrader account Auto Close is configured for
-  23:59 while the fixed strategy session-close is 30 seconds before a midnight
-  session end (23:59:30). Auto Close therefore wins, sends `External` market
-  exits and disables all strategies during callback reconciliation. Source now
-  handles a completed external flatten cleanly, but deterministic ownership
-  requires the strategy close to be scheduled earlier than Auto Close with a
-  tested margin. Changing that time changes end-of-day P&L and is not automatic.
+- *(needs live confirmation)* Strategy session close is now 23:58 and account
+  Auto Close remains 23:59. Confirm the strategy owns cancellation/flattening,
+  all six leases release, and Auto Close does not need to intervene.
 
 **Live-release blockers** (also listed in `nt8/README.md`)
 
@@ -84,23 +83,34 @@ next live/Playback session must confirm the lifecycle changes.
   `Documents\NinjaTrader 8\PropRouter\` is authoritative.
 - `nt8/Broker_statement.csv` has been re-exported with fresh balances; a stale
   hand-edited test value was removed.
-- On this host the checked-in-path `venv` launcher currently points to a missing
-  Python 3.9 installation; system Python 3.12 lacks NumPy/Pandas. The recorded
-  24/24 Python result is the last known result, not a rerun from 28 August. The
-  independent C# router suite is unaffected.
+- Physical workspace: `I:\PycharmProjects\Accounts_staggering\`. Windows tools may
+  display the compatibility/junction path
+  `C:\Users\Liikurserv\PycharmProjects\Accounts_staggering\`; it is not a second
+  checkout. The venv itself points to a separate, missing AppData Python 3.9 base
+  installation; system Python 3.12 lacks NumPy/Pandas. The recorded 24/24 Python
+  result is the last known result, not a rerun from 28 August. The independent C#
+  router suite is unaffected.
+- Legacy evaluations are observed to become available intermittently despite
+  general public retirement language. Future purchase modeling must use the
+  offers actually available at each decision time, not a permanent yes/no flag.
+- Withdrawal modeling is not yet live-book-valid. `signal_router.py` shares the
+  per-seat `account_farming.py` mechanics, but its fixed homogeneous K plus
+  replacement-only cash loop omits staggered growth from the current six mixed
+  seats. The standalone farming runner couples every added seat to more exposure,
+  which violates the routed book's fixed-R premise.
 
 ## Next steps
 
-1. Recompile in NinjaScript Editor. Confirm all six seats register and a completed
-   trade returns its seat to `Free` without the acknowledged orphan blocking
-   runtime self-heal.
-2. Playback-test end of session and choose an ordering that makes the strategy
-   session close complete before account Auto Close; then repeat one live close.
+1. Confirm all six seats registered in the new session and a completed trade
+   returns its seat to `Free` without the acknowledged orphan blocking runtime
+   self-heal.
+2. Inspect the new session's end-of-day logs: verify the 23:58 strategy close
+   completes before 23:59 account Auto Close and all six leases release.
 3. Run a full session and render it with `routing_report.py`; confirm no seat
    latches and no unexplained `⚠️`/`⛔` lines.
-4. Decide the `protect_frozen` question: seats 1 and 2 are frozen and
-   payout-capable, and `max_headroom` ranks them first, so they take most
-   signals. `signal_router.py` has a policy that deliberately does the opposite.
-5. Replay live decisions through `signal_router.py`'s allocator and confirm the
-   chosen seat matches on every decision.
+4. Extend the completed-trade routed simulator with the current six seat states,
+   dynamic K, constrained withdrawals, a cash pot and intermittent product offers;
+   then select a payout/replacement rule without changing R.
+5. Replay live decisions through `signal_router.py` using its selected
+   `max_headroom` policy and confirm the chosen seat matches on every decision.
 6. Address the zero-band stop-limit gap before any live-ready claim.

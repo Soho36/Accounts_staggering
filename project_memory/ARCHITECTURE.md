@@ -21,12 +21,32 @@ NT8 charts (6) ──> Strategy instances ──> PropRouter (static) ──> ro
 | Component | Responsibility |
 |---|---|
 | `account_farming.py` | prop-account rule model: trailing drawdown, frozen floor, liquidation, payouts. Defines `Rule(dd, frozen_floor)` and the floor formula the whole project depends on. |
-| `addiotional_helpers/signal_router.py` | allocation model. Defines the policies (`max_headroom`, `round_robin`, `protect_frozen`, …), the selection key, and the R/K sweep. **Reference implementation for live routing.** |
+| `addiotional_helpers/signal_router.py` | allocation model. Defines the policies (`max_headroom`, `round_robin`, `protect_frozen`, …), the selection key, and the R/K sweep. Its **`max_headroom` branch** is the reference implementation for live routing; the other policies are research comparisons. |
 | `results/signal_routing.md` | generated study output: capacity matrix, `K ≥ 5R`, cashout by R. Regenerate, never hand-edit. |
 
 `signal_router.py` is intentionally a **completed-trade** allocation model. It
 does not simulate order placement, pending orders, re-pricing, rejection or
 missed fills, and should not be extended to.
+
+### Relationship between farming, routing and withdrawals
+
+The two Python branches share the same per-seat mechanics: `signal_router.py`
+imports `account_farming.py` and calls `new_account()` / `step()` with its `Rule`
+and `Harvest` objects. They diverge at book level:
+
+- `account_farming.run_book()` applies each accepted strategy trade to every live
+  seat. Buying another seat therefore increases both K and exposure.
+- `signal_router.simulate_route()` correctly separates fixed signal exposure R
+  from seat count K and advances only the seats selected for each signal, but K
+  is fixed at the start; payouts can replace dead seats only up to that original
+  K. It does not model staggered growth from the current six-seat live state.
+
+Consequently, a withdrawal rule selected from standalone `account_farming.py`
+cannot be declared optimal for the routed book. The next economic model must keep
+`signal_router.py`'s fixed-R allocation while adding dynamic K, heterogeneous
+live-seat starting states, constrained payout events and time-varying purchase
+availability/cost. This is an economic/lifecycle extension, not an order-engine
+simulation.
 
 ## Live side (`nt8/`)
 

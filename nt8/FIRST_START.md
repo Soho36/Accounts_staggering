@@ -260,7 +260,8 @@ Before any wider test, observe one complete controlled sequence:
 6. Confirm an intrabar target touch with a close below target does nothing; a
    later 30-minute close at/above 1R submits the sell limit at close plus offset.
 7. Confirm NinjaTrader's built-in session-close handling cancels/flattens at the
-   configured Trading Hours session end; there is no strategy-level 23:57 cutoff.
+   configured Trading Hours session end. The current setting is 120 seconds
+   before a midnight session (23:58); there is no strategy-level 23:57 cutoff.
    Record NinjaTrader's separate account-level Auto Close time and ensure the
    strategy close occurs first with enough margin. If Auto Close fires first, it
    disables the strategies while final status callbacks may still be arriving.

@@ -15,9 +15,14 @@ python -m unittest discover -s tests -v
 
 Current expected result: `Ran 24 tests` and `OK`.
 
-Host note (2026-08-28): `venv\Scripts\python.exe` currently resolves to a missing
-Python 3.9 base interpreter, while system Python 3.12 does not have NumPy/Pandas.
-Repair/recreate the venv before treating a skipped rerun as a passing result.
+Host note (2026-08-28): the physical workspace is
+`I:\PycharmProjects\Accounts_staggering\`; a Windows compatibility/junction path
+may be displayed as `C:\Users\Liikurserv\PycharmProjects\Accounts_staggering\`.
+That alias is not a second project. Independently, `venv\pyvenv.cfg` points to the
+now-missing base interpreter
+`C:\Users\Liikurserv\AppData\Local\Programs\Python\Python39`, while system Python
+3.12 does not have NumPy/Pandas. Repair/recreate the venv from the physical `I:`
+workspace before treating a skipped rerun as a passing result.
 
 ---
 

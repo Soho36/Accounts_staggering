@@ -446,7 +446,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EntryHandling = EntryHandling.UniqueEntries;
                 BarsRequiredToTrade = 5;
                 IsExitOnSessionCloseStrategy = true;
-                ExitOnSessionCloseSeconds = 30;
+                ExitOnSessionCloseSeconds = 120;
                 StartBehavior = StartBehavior.ImmediatelySubmit;
                 IsUnmanaged = false;
                 // Fidelity setting from the original strategy. There is no complete custom

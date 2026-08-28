@@ -30,14 +30,14 @@ The source now applies the same narrow rule at startup and runtime.
 
 **Acceptance:** only flat + `Unknown` + exact acknowledged id is ignored.
 
-### 3. Make end-of-session ownership deterministic
+### 3. Validate deterministic end-of-session ownership
 On 27 August account Auto Close fired at 23:59, before the strategy's fixed
-23:59:30 session close for a midnight template. It submitted external market
-exits and disabled all six strategies while callbacks were still arriving.
-- [ ] In Playback, choose and test a strategy session-close lead time that exits
-      before account Auto Close with enough order/callback margin.
-- [ ] Keep account Auto Close as the final backstop unless broker rules prevent
-      that ordering.
+23:59:30 session close for a midnight template. The strategy is now compiled with
+a 120-second lead (23:58), while account Auto Close remains 23:59.
+- [ ] Confirm the strategy cancels/flattens at 23:58 and its callbacks complete
+      before account Auto Close.
+- [ ] Confirm account Auto Close remains a later backstop and does not submit an
+      `External` exit during the normal close.
 - [ ] Confirm completed external flattening releases seats cleanly; if termination
       precedes the fill, confirm the new warning is truthful and the operator
       restart procedure is followed.
@@ -68,16 +68,39 @@ simulation accounts with all 23 windows and `Routed`.
 
 ---
 
-## Open policy question
+## Open operational question
 
-### 7. `max_headroom` vs `protect_frozen` for frozen seats
-Seats 1 and 2 are frozen and payout-capable. Because a frozen floor lets headroom
-exceed the drawdown size, `max_headroom` ranks them first and routes to them most
-often. `signal_router.py` has a `protect_frozen` policy that deliberately does the
-opposite, treating a frozen seat as an asset to shelter.
-- [ ] Decide which the live book should use.
-- [ ] If `protect_frozen`, the policy must be selectable and recorded in the
-      manifest fingerprint.
+### 7. Withdrawal and replacement plan for frozen seats
+Routing remains `max_headroom`, matching the selected `signal_router.py` policy.
+`protect_frozen` is an evaluated alternative, not the reference specification;
+for R=1/K=6 it performed materially worse in the stored study.
+The existing withdrawal result cannot answer the live question by itself:
+`account_farming.run_book()` gives every live seat every trade, so growth raises
+exposure, while `signal_router.py` keeps R fixed but starts all K homogeneous and
+uses payout cash only for replacement up to the original K.
+
+- [ ] Add a routed-farming scenario initialized from the six actual seats: start,
+      drawdown, equity, peak/floor, frozen state and availability date.
+- [ ] Keep R fixed while allowing K to change when a purchase is made; newly
+      acquired seats must enter the same `max_headroom` competition only after
+      they become tradable.
+- [ ] Model payout constraints explicitly: eligibility days, consistency, payout
+      number, minimum/maximum request, approval/removal timing and payout split.
+- [ ] Model a cash pot plus time-varying product inventory. Legacy evaluations are
+      available intermittently, so neither always-available nor never-available
+      is correct; record the actual offer, tier and all-in cost at each purchase.
+- [ ] Sweep withdrawal amount/cadence and minimum retained headroom jointly with
+      purchase rules. Include the applicable post-withdrawal MAE limit;
+      liquidation headroom alone is not a payout-compliance calculation.
+- [ ] Compare policies on fixed delivered exposure/P&L and report realized cash,
+      safe endpoint withdrawal, live K, purchases, deaths and worst seat-loss
+      cluster across chronological/blocked periods.
+- [ ] Only after a policy survives that test, turn it into an operator plan and
+      verify NetLiquidation/headroom after each real withdrawal before resuming.
+
+**Acceptance:** one reproducible model answers both where each fixed-R signal is
+routed and when/how much cash leaves or buys a seat, starting from the real book;
+no result relies on increasing R when K grows.
 
 ---
 
