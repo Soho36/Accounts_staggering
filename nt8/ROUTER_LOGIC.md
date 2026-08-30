@@ -199,6 +199,35 @@ profit will look worse than it is.
 Until a seat's floor freezes (`peak >= start + dd + 100`), maximising MFE
 give-back is the fastest way to burn a container without losing a single trade.
 
+## Temporarily excluding one account (payout requests)
+
+Set **`Seat paused` = true** on that one chart, then disable and re-enable that
+strategy. Nothing else changes.
+
+- No new peak file. Peaks belong to accounts, not to book membership.
+- No change to any other chart's settings.
+- No change to `Expected seats`, and **no Instance ID renumbering**.
+
+The paused seat stays registered, seeded, fresh and counted toward quorum, so the
+other five keep trading normally. It is simply never selected. Decisions report
+it:
+
+```
+READY R=1 pending=0 need=1 eligible=4/6 blocked=0 PAUSED=1
+book 1:3287.56(PAUSED) 2:2694.58 6:2227.41 4:1810.77 5:1542.25 3:296.15
+```
+
+Set it back to false and re-enable to resume.
+
+**Do not instead disable the chart.** Quorum requires every Instance ID from
+`1..ExpectedSeats` to be registered, so removing one seat stops the *entire*
+book, not just that account.
+
+**A paused seat still finishes what it started.** An open position keeps its stop
+and target and is managed to completion, and a working entry order it already
+owns still counts against `R`. If the balance must not move at all, pause it and
+wait until it is flat before submitting the payout request.
+
 ## Orphaned orders after a crash
 
 If the machine hangs or NinjaTrader dies with a working entry order, NT8 may keep

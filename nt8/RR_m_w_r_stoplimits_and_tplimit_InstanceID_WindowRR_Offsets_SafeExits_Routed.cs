@@ -74,6 +74,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private EntrySetup submittingEntrySetup;
         private readonly List<EntrySetup> recentEntrySetups = new List<EntrySetup>();
         private DateTime pendingWithoutOrderSince = Core.Globals.MinDate;
+        private bool pausedAnnounced;
         private readonly object exitOrdersSync = new object();
         private readonly List<Order> stopOrders = new List<Order>();
         private readonly List<Order> takeProfitOrders = new List<Order>();
@@ -176,6 +177,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Require headroom covers stop", Order = 8, GroupName = "Signal Routing",
                  Description = "Optional safety: skip any seat whose headroom is smaller than this trade's initial stop risk. Off matches the study exactly.")]
         public bool RequireHeadroomCoversStop { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Seat paused", Order = 10, GroupName = "Signal Routing",
+                 Description = "Temporarily exclude THIS account from new allocations, e.g. while a " +
+                               "payout request is pending and the balance must not move. The seat stays " +
+                               "registered and counted toward quorum, so the other seats keep trading. " +
+                               "It still manages any position it already holds. Disable and re-enable " +
+                               "this one strategy to apply a change.")]
+        public bool SeatPaused { get; set; }
 
         [NinjaScriptProperty]
         [Display(Name = "Acknowledged orphan order IDs", Order = 9, GroupName = "Signal Routing",
@@ -473,6 +483,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 UseUnrealizedEquity = true;
                 RequireHeadroomCoversStop = false;
                 AcknowledgeOrphanOrderIds = string.Empty;
+                SeatPaused = false;
 
                 RR00 = RR01 = RR02 = RR03 = RR04 = RR05 = 0.0;
                 RR06 = RR07 = RR08 = RR09 = RR10 = RR11 = 0.0;
@@ -610,6 +621,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             PublishEquity();
             PublishStatus();
+
+            ApplySeatPause();
 
             Print($"[{EntrySignalName}] 🔗 seat registered — book={BookId} account={Account.Name} " +
                    $"start={SeatStartBalance:F0} dd={SeatDrawdown:F0} freeze=+{SeatFrozenOffset:F0} " +
@@ -1067,6 +1080,37 @@ namespace NinjaTrader.NinjaScript.Strategies
                     || PositionAccount.MarketPosition == MarketPosition.Flat;
             }
             catch { return false; }     // cannot prove flat - retain the reservation
+        }
+
+        /// <summary>
+        /// Pushes the operator's pause flag to the router. Kept separate from status so a
+        /// paused seat still publishes equity and status and therefore still satisfies
+        /// quorum - pausing removes a seat from selection, it does not remove it from the book.
+        /// </summary>
+        private void ApplySeatPause()
+        {
+            if (!routerRegistered)
+                return;
+
+            string reason;
+            if (!PropRouter.SetPaused(BookId, InstanceId, routerLease, SeatPaused, out reason))
+            {
+                ReportRouterFailure("set paused", reason);
+                return;
+            }
+
+            if (SeatPaused && !pausedAnnounced)
+            {
+                Print($"[{EntrySignalName}] ⏸ SEAT PAUSED — {Account.Name} will not receive new " +
+                      "allocations. It still manages any open position, and still counts toward " +
+                      "quorum so the rest of the book keeps trading.");
+                pausedAnnounced = true;
+            }
+            else if (!SeatPaused && pausedAnnounced)
+            {
+                Print($"[{EntrySignalName}] ▶ seat resumed — {Account.Name} is competing again.");
+                pausedAnnounced = false;
+            }
         }
 
         private void PublishStatus()
@@ -1600,6 +1644,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             // Keep the registry current even on bars that produce no signal.
             PublishEquity();
+            ApplySeatPause();
             TryReconcileStuckPending();
             PublishStatus();
 

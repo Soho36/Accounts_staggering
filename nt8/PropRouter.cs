@@ -74,6 +74,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public bool			PeakSeeded;
 
 		public SeatStatus	Status			= SeatStatus.Free;
+
+		/// <summary>
+		/// Operator-held exclusion, e.g. while a payout request is pending and the balance
+		/// must not move. A paused seat stays registered, seeded, fresh and counted toward
+		/// quorum - so the rest of the book keeps trading - but is never selected for a new
+		/// signal. It still manages any position it already holds, and a Pending reservation
+		/// it already owns still counts against R.
+		/// </summary>
+		public bool			Paused;
+
 		public bool			Connected;
 		public int			TradesTaken;
 		public DateTime		EquityAsOf		= DateTime.MinValue;
@@ -365,6 +375,28 @@ namespace NinjaTrader.NinjaScript.AddOns
 				}
 
 				return RatchetPeak(b, seat, observedEquity, out reason);
+			}
+		}
+
+		/// <summary>Excludes a seat from selection without deregistering it.</summary>
+		public static bool SetPaused(string book, int instanceId, Guid lease,
+			bool paused, out string reason)
+		{
+			lock (sync)
+			{
+				PropBook b;
+				PropSeat seat;
+				if (!TryGetSeat(book, instanceId, lease, out b, out seat, out reason))
+					return false;
+
+				if (seat.Paused != paused)
+				{
+					seat.Paused = paused;
+					ClearDecisions(b);      // a cached decision must not outlive the change
+				}
+				seat.LeaseHeartbeatAsOf = DateTime.UtcNow;
+				reason = paused ? "seat paused" : "seat active";
+				return true;
 			}
 		}
 
@@ -663,7 +695,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 			// max_headroom, with signal_router.py's tie-breaks: (-headroom, trades, seat_id)
 			List<PropSeat> eligible = b.Seats.Values
-				.Where(s => s.Status == SeatStatus.Free
+				.Where(s => !s.Paused
+						 && s.Status == SeatStatus.Free
 						 && s.Headroom > 0
 						 && s.Headroom >= requiredHeadroom)
 				.OrderByDescending(s => s.Headroom)
@@ -673,11 +706,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 			List<int> winners = eligible.Take(need).Select(s => s.InstanceId).ToList();
 
+			int paused = b.Seats.Values.Count(s => s.Paused);
+
 			detail = string.Format(CultureInfo.InvariantCulture,
-				"READY R={0} pending={1} need={2} eligible={3}/{4} blocked={5}{6}",
+				"READY R={0} pending={1} need={2} eligible={3}/{4} blocked={5}{6}{7}",
 				copies, pending, need, eligible.Count, b.Seats.Count,
 				Math.Max(0, need - winners.Count),
-				pending > copies ? " OVER_CAP=" + (pending - copies) : string.Empty);
+				pending > copies ? " OVER_CAP=" + (pending - copies) : string.Empty,
+				paused > 0 ? " PAUSED=" + paused : string.Empty);
 
 			return winners;
 		}
@@ -1160,7 +1196,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				.ThenBy(s => s.InstanceId)
 				.Select(s => string.Format(CultureInfo.InvariantCulture,
 					"{0}:{1:F2}{2}", s.InstanceId, s.Headroom,
-					s.Status == SeatStatus.Free ? string.Empty : "(" + s.Status + ")"))
+					s.Paused ? "(PAUSED)"
+						: s.Status == SeatStatus.Free ? string.Empty : "(" + s.Status + ")"))
 				.ToArray());
 		}
 
