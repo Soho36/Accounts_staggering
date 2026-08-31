@@ -619,10 +619,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
+            // Pause BEFORE the first status publish. Registration alone does not make a
+            // seat eligible - StatusAsOf stays MinValue until PublishStatus - so applying the
+            // pause first closes the window in which a concurrently-starting instance could
+            // compute a decision that still counted this seat. Observed 2026-08-31: the very
+            // first decision reported eligible=6/6 with no PAUSED because the flag landed one
+            // call too late.
             PublishEquity();
-            PublishStatus();
-
             ApplySeatPause();
+            PublishStatus();
 
             Print($"[{EntrySignalName}] 🔗 seat registered — book={BookId} account={Account.Name} " +
                    $"start={SeatStartBalance:F0} dd={SeatDrawdown:F0} freeze=+{SeatFrozenOffset:F0} " +
