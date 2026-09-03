@@ -69,6 +69,37 @@ Two open contracts, `R = 1`, and nothing is wrong. If you ever want a hard cap o
 total open contracts, that is a **separate** risk governor — the router does not
 provide one, by design, because the study did not model one.
 
+## How long an entry order lives
+
+An entry order is valid for **exactly one bar**: the bar that follows the red
+candle that produced it.
+
+At every bar close the strategy either
+
+- **renews** it — this bar is also a valid red-candle signal, so the working order
+  is re-priced in place to the new candle's high/low (this is a continuation, not
+  a new copy, and does not consume a router slot); or
+- **cancels** it — this bar produced no signal (not red, invalid R:R or candle
+  risk, or a gap above the entry), so the order has expired.
+
+The order also cancels when the trade window closes.
+
+Look for `⏱ Entry from <time> not renewed by this bar → cancelling stale order`.
+That line is normal, not a fault.
+
+**Why this rule exists.** With all 23 windows enabled the window almost never
+closes, so before this rule an unfilled entry could stay working indefinitely at
+a stale price. On 2026-09-03 the 15:00 signal on seat 1 was never renewed; the
+order sat at 29174 for nearly three hours while price had already moved away.
+The seat stayed `Pending` the whole time, and at R=1 a single `Pending` seat
+blocks the entire book.
+
+**Never cancel a strategy's entry order by hand.** Doing so on 2026-09-03 left
+NinjaTrader's managed entry tracking for that signal name unable to accept
+another entry: every later submission returned `⛔ entry API returned no Order
+object` for the rest of the session. If it happens, restart that one strategy
+instance (disable and re-enable the chart) — a peak-file reseed will not help.
+
 ## Eligibility — a Free seat can still be skipped
 
 A seat only competes if **all** of these hold:

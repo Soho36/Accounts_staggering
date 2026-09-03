@@ -41,6 +41,9 @@ namespace NinjaTrader.NinjaScript.Strategies
     public class RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRouted : Strategy
     {
         private Order longOrder;
+        // Bar whose signal produced the currently working entry order. An entry that
+        // survives to the next bar close without being re-priced has expired.
+        private DateTime entryOrderBarTime = Core.Globals.MinDate;
         private double pendingStopPrice;
         private double entryPrice;
         private double riskPerTrade;
@@ -1540,10 +1543,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     PublishStatus();
                     Print($"[{setup.SignalTime}] [{EntrySignalName}] ⛔ {context} entry API returned no Order object");
+                    Print($"[{setup.SignalTime}] [{EntrySignalName}]    NinjaTrader refused the managed entry. This persists for the rest of "
+                        + "the session once it starts - most often after an entry order was cancelled outside the strategy. "
+                        + "Restart THIS strategy instance (disable/enable the chart) to reset its managed entry tracking; the "
+                        + "seat self-heals to Free but will keep failing until then.");
                 }
                 else
                 {
                     BindEntryOrderSetup(submitted, setup);
+                    entryOrderBarTime = setup.SignalTime;
                     // A synchronous fill/rejection callback may already have made the order
                     // terminal and cleared longOrder. Do not resurrect a terminal reference.
                     longOrder = IsActiveOrder(submitted) ? submitted : null;
@@ -1715,51 +1723,75 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             // 🔹 Red candle logic
-			/// ENTRY BLOCK
-            if (Close[0] < Open[0])
-			{
-				double candidateEntryPrice = High[0];
-				double candidateStopPrice = Low[0];
-				double candidateRisk = candidateEntryPrice - candidateStopPrice;
-				double candidateRiskReward = GetWindowRiskReward(Time[0]);
-				Print($"[{Time[0]}] [{EntrySignalName}] Window R:R={candidateRiskReward}");
+            bool renewedEntry = EvaluateEntryCandle();
 
-                if (candidateRiskReward <= 0 || candidateRisk <= 0)
-                {
-                    Print($"[{Time[0]}] [{EntrySignalName}] Invalid R:R or candle risk - skipping entry");
-                    return;
-                }
+            // An entry order is valid only for the single bar that follows the candle that
+            // produced it. If this bar did not renew it - no red candle, invalid R:R, or a
+            // gap above the entry - it has expired and is cancelled here.
+            //
+            // Observed 2026-09-03: the 15:00 signal was never renewed for the rest of the
+            // session, so the order sat working at a stale 29174 for nearly three hours and
+            // held seat 1 Pending. At R=1 that blocks the whole book, and cancelling it by
+            // hand left NinjaTrader unable to accept another Long1_1 entry all day.
+            if (!renewedEntry && IsActiveOrder(longOrder)
+                && entryOrderBarTime != Core.Globals.MinDate && Time[0] > entryOrderBarTime)
+            {
+                Print($"[{Time[0]}] [{EntrySignalName}] ⏱ Entry from {entryOrderBarTime} not renewed "
+                    + $"by this bar → cancelling stale order @ {longOrder.StopPrice}");
+                CancelOrder(longOrder);
+            }
+        }
 
-				Print($"[{Time[0]}] [{EntrySignalName}] 🔴 Red candle detected -> evaluating entry");
-				Print($"[{Time[0]}] [{EntrySignalName}] Entry={candidateEntryPrice} SL={candidateStopPrice} Risk={candidateRisk}");
+        // Returns true only when this bar submitted or re-priced the entry order. Every
+        // other path leaves any working entry unrenewed, which expires it at this bar close.
+        private bool EvaluateEntryCandle()
+        {
+            /// ENTRY BLOCK
+            if (Close[0] >= Open[0])
+                return false;
 
-				double ask = GetCurrentAsk();
+            double candidateEntryPrice = High[0];
+            double candidateStopPrice = Low[0];
+            double candidateRisk = candidateEntryPrice - candidateStopPrice;
+            double candidateRiskReward = GetWindowRiskReward(Time[0]);
+            Print($"[{Time[0]}] [{EntrySignalName}] Window R:R={candidateRiskReward}");
 
-				if (ask >= candidateEntryPrice)
-				{
-					Print($"[{Time[0]}] [{EntrySignalName}] ⚠️ Gap above entry → skipping stop placement");
-					return;
-				}
+            if (candidateRiskReward <= 0 || candidateRisk <= 0)
+            {
+                Print($"[{Time[0]}] [{EntrySignalName}] Invalid R:R or candle risk - skipping entry");
+                return false;
+            }
 
-                EntrySetup candidate = new EntrySetup(Time[0], candidateEntryPrice,
-                    candidateStopPrice, candidateRisk, candidateRiskReward);
+            Print($"[{Time[0]}] [{EntrySignalName}] 🔴 Red candle detected -> evaluating entry");
+            Print($"[{Time[0]}] [{EntrySignalName}] Entry={candidateEntryPrice} SL={candidateStopPrice} Risk={candidateRisk}");
 
-                // Original behaviour: a new red candle re-prices the working entry IN PLACE via
-                // the managed API, so an entry order is continuously live. This seat is already
-                // carrying the signal, so re-pricing is a continuation, not a new copy, and does
-                // not consume a router slot.
-                if (IsActiveOrder(longOrder))
-                {
-                    SubmitEntrySetup(candidate, "re-priced working entry");
-                    return;
-                }
+            double ask = GetCurrentAsk();
 
-                // === ROUTING GATE — every local disqualifier has now passed ===
-                if (!MayEnter(candidateRisk))
-                    return;
+            if (ask >= candidateEntryPrice)
+            {
+                Print($"[{Time[0]}] [{EntrySignalName}] ⚠️ Gap above entry → skipping stop placement");
+                return false;
+            }
 
-                SubmitEntrySetup(candidate, "new routed signal");
-			}
+            EntrySetup candidate = new EntrySetup(Time[0], candidateEntryPrice,
+                candidateStopPrice, candidateRisk, candidateRiskReward);
+
+            // Original behaviour: a new red candle re-prices the working entry IN PLACE via
+            // the managed API, so an entry order is continuously live. This seat is already
+            // carrying the signal, so re-pricing is a continuation, not a new copy, and does
+            // not consume a router slot.
+            if (IsActiveOrder(longOrder))
+            {
+                SubmitEntrySetup(candidate, "re-priced working entry");
+                return true;
+            }
+
+            // === ROUTING GATE — every local disqualifier has now passed ===
+            if (!MayEnter(candidateRisk))
+                return false;
+
+            SubmitEntrySetup(candidate, "new routed signal");
+            return true;
         }
 
 		/// STOP-LOSS ORDERS BLOCK
