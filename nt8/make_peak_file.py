@@ -63,7 +63,7 @@ from decimal import Decimal, InvalidOperation
 SEAT_CONFIG = {
     "PA-APEX-240737-09": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
     "PA-APEX-240737-10": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
-    "PA-APEX-240737-12": {"instance": 3, "start": "50000", "dd": "2000", "kind": "eod"},
+    "PA-APEX-240737-16": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
     "PA-APEX-240737-13": {"instance": 4, "start": "50000", "dd": "2000", "kind": "eod"},
     "PA-APEX-240737-14": {"instance": 5, "start": "50000", "dd": "2000", "kind": "intraday"},
     "PA-APEX-240737-15": {"instance": 6, "start": "50000", "dd": "2500", "kind": "intraday"},
@@ -215,10 +215,23 @@ def model_floor(peak, dd, start, frozen_offset=FROZEN_OFFSET):
 
 
 def read_statement(path):
+    # The Apex portal exports comma-delimited in some contexts and tab-delimited in
+    # others; both carry the identical column set. Try each and keep the one that
+    # actually yields every required column, rather than guessing from the content.
+    # Nothing else is relaxed: a decimal comma inside a tab-delimited field still
+    # fails at Decimal() below, which is the check that matters.
     with io.open(path, "r", encoding="utf-8-sig", newline="") as fh:
-        reader = csv.DictReader(fh)
-        fields = [(f or "").strip() for f in (reader.fieldnames or [])]
-        rows = list(reader)
+        text = fh.read()
+
+    fields, rows, delimiter = [], [], None
+    for candidate in (",", "	"):
+        reader = csv.DictReader(io.StringIO(text), delimiter=candidate)
+        got = [(f or "").strip() for f in (reader.fieldnames or [])]
+        if not [c for c in REQUIRED_COLUMNS if c not in got]:
+            fields, rows, delimiter = got, list(reader), candidate
+            break
+        if delimiter is None:
+            fields = got          # keep the first attempt's columns for the error text
 
     absent = [c for c in REQUIRED_COLUMNS if c not in fields]
     if absent:
@@ -270,15 +283,41 @@ def build_seed(row, seat_config):
 
     if balance is None:
         raise SeedError("account %s has no Account Balance" % account)
+    derived_note = ""
     if peak is None:
-        raise SeedError("account %s has an empty Auto Liquidate Peak Balance cell. "
-                        "The governing high-water mark is unknown, so the seat "
-                        "cannot be seeded. Re-export the statement." % account)
+        # A brand-new account has no high-water mark cell yet, and re-exporting will
+        # not create one. The peak is still PROVED rather than guessed: the broker's
+        # threshold IS peak - dd, so peak = threshold + dd. That is the same identity
+        # this script verifies for every traded row, used in the other direction.
+        #
+        # It yields the correct FLOOR in both regimes, which is all the router
+        # consumes: unfrozen, it recovers the true peak exactly; frozen, it recovers
+        # the smallest peak consistent with the threshold, and floor is capped at
+        # start + frozen offset either way. Note that it does make the intraday
+        # peak-minus-threshold check tautological for this row - the row's own
+        # drawdown is no longer independently proved, so the start/dd in SEAT_CONFIG
+        # must be confirmed against the broker by eye for a newly added seat.
+        if threshold is None:
+            raise SeedError("account %s has an empty Auto Liquidate Peak Balance cell "
+                            "AND an empty Auto Liquidate Threshold Value. The governing "
+                            "high-water mark cannot be derived, so the seat cannot be "
+                            "seeded. Re-export the statement." % account)
+        peak = threshold + dd
+        if peak < start - TOL:
+            raise SeedError(disagreement(account, [
+                ("Auto Liquidate Threshold Value", threshold),
+                ("SEAT_CONFIG drawdown", dd),
+                ("derived peak (threshold + drawdown)", peak),
+                ("SEAT_CONFIG start balance", start),
+            ], "No high-water mark was reported, so the peak was derived from the "
+               "threshold - but a peak below the starting balance is impossible. "
+               "The configured start balance or drawdown is wrong."))
+        derived_note = "peak derived from threshold + dd (no high-water mark reported)"
 
     frozen_level = start + FROZEN_OFFSET
     floor = model_floor(peak, dd, start)
     frozen = (peak - dd) >= frozen_level
-    note = ""
+    note = derived_note
 
     if kind == "intraday":
         if threshold is None:
