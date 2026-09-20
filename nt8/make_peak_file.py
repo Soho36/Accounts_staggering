@@ -61,8 +61,8 @@ from decimal import Decimal, InvalidOperation
 # router models every seat as intraday.
 # ---------------------------------------------------------------------------
 SEAT_CONFIG = {
-    "PA-APEX-240737-09": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
-    "PA-APEX-240737-10": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
+    "PA-APEX-240737-17": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
+    "PA-APEX-240737-18": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
     "PA-APEX-240737-16": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
     "PA-APEX-240737-13": {"instance": 4, "start": "50000", "dd": "2000", "kind": "eod"},
     "PA-APEX-240737-14": {"instance": 5, "start": "50000", "dd": "2000", "kind": "intraday"},
