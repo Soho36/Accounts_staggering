@@ -17,8 +17,9 @@ using System.Text;
 // Routed variant of RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExits.
 //
 // The routed strategy plus an optional consecutive-red-run entry cap.
-// MaxRedRun=0 preserves the original routed entry rules. An enabled cap is an
-// intentional strategy change; prior signal_router.py results do not include it.
+// MaxRedRun=0 disables the red-run cap. Green/doji bars preserve pending entries.
+// An enabled cap is an intentional strategy change; prior signal_router.py
+// results do not include it.
 //
 //   * RealtimeErrorHandling stays IgnoreAllErrors, as in the original.
 //   * A new red candle re-prices the working entry IN PLACE (managed API), so an
@@ -41,8 +42,8 @@ namespace NinjaTrader.NinjaScript.Strategies
     public class RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRoutedMaxRedRun : Strategy
     {
         private Order longOrder;
-        // Bar whose signal produced the currently working entry order. An entry that
-        // survives to the next bar close without being re-priced has expired.
+        // Bar whose signal produced the currently working entry order. Green/doji
+        // bars preserve this setup; a rejected later red signal can invalidate it.
         private DateTime entryOrderBarTime = Core.Globals.MinDate;
         private double pendingStopPrice;
         private double entryPrice;
@@ -1762,25 +1763,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             // 🔹 Red candle logic
             bool renewedEntry = EvaluateEntryCandle();
 
-            // An entry order is valid only for the single bar that follows the candle that
-            // produced it. If this bar did not renew it - no red candle, red-run cap, invalid R:R, or a
-            // gap above the entry - it has expired and is cancelled here.
-            //
-            // Observed 2026-09-03: the 15:00 signal was never renewed for the rest of the
-            // session, so the order sat working at a stale 29174 for nearly three hours and
-            // held seat 1 Pending. At R=1 that blocks the whole book, and cancelling it by
-            // hand left NinjaTrader unable to accept another Long1_1 entry all day.
-            if (!renewedEntry && IsActiveOrder(longOrder)
+            // A green/doji bar supplies no replacement signal: keep the pending entry
+            // and its router reservation, matching the standalone strategy and MT5.
+            // Preserve cancellation for a rejected RED signal (red-run cap, invalid
+            // R:R/risk, or gap). Order callbacks release ownership after confirmation.
+            if (Close[0] < Open[0] && !renewedEntry && IsActiveOrder(longOrder)
                 && entryOrderBarTime != Core.Globals.MinDate && Time[0] > entryOrderBarTime)
             {
-                Print($"[{Time[0]}] [{EntrySignalName}] ⏱ Entry from {entryOrderBarTime} not renewed "
-                    + $"by this bar → cancelling stale order @ {longOrder.StopPrice}");
+                Print($"[{Time[0]}] [{EntrySignalName}] ⏱ Entry from {entryOrderBarTime} invalidated "
+                    + $"by rejected red signal → cancelling pending order @ {longOrder.StopPrice}");
                 CancelOrder(longOrder);
             }
         }
 
         // Returns true only when this bar submitted or re-priced the entry order. Every
-        // other path leaves any working entry unrenewed, which expires it at this bar close.
+        // other path leaves it unrenewed; only a red signal triggers cancellation
+        // in OnBarUpdate.
         private bool EvaluateEntryCandle()
         {
             /// ENTRY BLOCK
@@ -1788,8 +1786,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return false;
 
             // Reject before both repricing and router allocation. Returning false
-            // lets OnBarUpdate cancel the unrenewed pending entry through its normal
-            // expiry path. Order callbacks retain ownership until cancellation/fill
+            // lets OnBarUpdate cancel the pending entry through its rejected-red
+            // signal path. Order callbacks retain ownership until cancellation/fill
             // is confirmed; do not release a Pending router seat here.
             if (ExceedsMaxRedRun())
             {
