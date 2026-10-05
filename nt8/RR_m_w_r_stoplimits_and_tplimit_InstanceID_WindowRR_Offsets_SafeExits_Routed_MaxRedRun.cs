@@ -83,6 +83,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private readonly List<Order> stopOrders = new List<Order>();
         private readonly List<Order> takeProfitOrders = new List<Order>();
         private bool lastWindowState = false;
+        private SessionIterator sessionIterator;
 
         // Router plumbing
         private volatile bool routerRegistered;
@@ -504,6 +505,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.DataLoaded)
             {
+                sessionIterator = new SessionIterator(Bars);
+
                 W00 = RR00 > 0; W01 = RR01 > 0; W02 = RR02 > 0; W03 = RR03 > 0;
                 W04 = RR04 > 0; W05 = RR05 > 0; W06 = RR06 > 0; W07 = RR07 > 0;
                 W08 = RR08 > 0; W09 = RR09 > 0; W10 = RR10 > 0; W11 = RR11 > 0;
@@ -1312,6 +1315,34 @@ namespace NinjaTrader.NinjaScript.Strategies
             return windowRiskRewards[time.Hour];
         }
 
+        // MT5 checks the window when the bar after the signal candle opens. Inside a
+        // session that is the signal bar's close, Time[0]. The session's last bar is
+        // stamped with the session end (e.g. 00:00), but NinjaTrader only processes it on
+        // the next session's first tick, and MT5 only sees it once that session opens - so
+        // it belongs to the next session's opening-hour window, as in the MT5 backtests.
+        private DateTime GetSignalWindowTime()
+        {
+            if (sessionIterator == null)
+                return Time[0];
+
+            sessionIterator.GetNextSession(Time[0], true);
+            if (Time[0] < sessionIterator.ActualSessionEnd)
+                return Time[0];
+
+            // Excluding the end stamp moves past the session this bar closed.
+            sessionIterator.GetNextSession(Time[0], false);
+            DateTime nextSessionBegin = sessionIterator.ActualSessionBegin;
+            return nextSessionBegin > Time[0] ? nextSessionBegin : Time[0];
+        }
+
+        // With Calculate.OnBarClose the signal bar is closed by the first tick of the next
+        // bar, which realtime Bars already holds. NaN when that bar is not available.
+        private double GetNextBarHigh()
+        {
+            int next = CurrentBar + 1;
+            return Bars != null && Bars.Count > next ? Bars.GetHigh(next) : double.NaN;
+        }
+
         private bool IsActiveOrder(Order order)
         {
             return order != null && IsActiveOrderState(order.OrderState);
@@ -1742,7 +1773,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (HasTrackedExitState())
                 ResetExitTracking();
 
-            bool inWindow = IsTradeWindow(Time[0]);
+            DateTime windowTime = GetSignalWindowTime();
+            bool inWindow = IsTradeWindow(windowTime);
 
             if (inWindow != lastWindowState)
             {
@@ -1761,7 +1793,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             // 🔹 Red candle logic
-            bool renewedEntry = EvaluateEntryCandle();
+            bool renewedEntry = EvaluateEntryCandle(windowTime);
 
             // A green/doji bar supplies no replacement signal: keep the pending entry
             // and its router reservation, matching the standalone strategy and MT5.
@@ -1779,7 +1811,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         // Returns true only when this bar submitted or re-priced the entry order. Every
         // other path leaves it unrenewed; only a red signal triggers cancellation
         // in OnBarUpdate.
-        private bool EvaluateEntryCandle()
+        private bool EvaluateEntryCandle(DateTime windowTime)
         {
             /// ENTRY BLOCK
             if (Close[0] >= Open[0])
@@ -1798,7 +1830,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             double candidateEntryPrice = High[0];
             double candidateStopPrice = Low[0];
             double candidateRisk = candidateEntryPrice - candidateStopPrice;
-            double candidateRiskReward = GetWindowRiskReward(Time[0]);
+            if (windowTime != Time[0])
+                Print($"[{Time[0]}] [{EntrySignalName}] Session-open signal: previous session's last candle "
+                    + $"evaluated for the {windowTime:HH:mm} window");
+
+            double candidateRiskReward = GetWindowRiskReward(windowTime);
             Print($"[{Time[0]}] [{EntrySignalName}] Window R:R={candidateRiskReward}");
 
             if (candidateRiskReward <= 0 || candidateRisk <= 0)
@@ -1811,10 +1847,16 @@ namespace NinjaTrader.NinjaScript.Strategies
             Print($"[{Time[0]}] [{EntrySignalName}] Entry={candidateEntryPrice} SL={candidateStopPrice} Risk={candidateRisk}");
 
             double ask = GetCurrentAsk();
+            // The bar after the signal has already started; its high is every trade
+            // printed since. At a session open the ask can still be the previous
+            // session's stale quote, but this bar's high is the new session's price.
+            double nextBarHigh = GetNextBarHigh();
 
-            if (ask >= candidateEntryPrice)
+            if (ask >= candidateEntryPrice
+                || (!double.IsNaN(nextBarHigh) && nextBarHigh >= candidateEntryPrice))
             {
-                Print($"[{Time[0]}] [{EntrySignalName}] ⚠️ Gap above entry → skipping stop placement");
+                Print($"[{Time[0]}] [{EntrySignalName}] ⚠️ Gap above entry → skipping stop placement "
+                    + $"(entry={candidateEntryPrice}, ask={ask}, next bar high={nextBarHigh})");
                 return false;
             }
 

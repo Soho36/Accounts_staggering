@@ -228,6 +228,16 @@ Then explicitly map each MT5 export hour into that global NT8 time basis,
 including daylight-saving transitions. Do not copy the 01–23 labels until a
 Playback signal-by-signal comparison proves the mapping.
 
+Session-open exception: the session's last bar is stamped with the session end
+(for example 00:00), but NinjaTrader processes it only on the next session's
+first tick. Like the MT5 EA, the strategy evaluates that candle in the window of
+the **next session's opening hour** (for example 01:00-02:00), so a red last
+candle submits the buy stop-limit at the open. The Output window logs
+`Session-open signal: ...` for these entries. If the new session opens at or
+above that candle's high, no order is submitted (`Gap above entry`). The gap
+check uses both the current ask and the high of the bar that has just started,
+because at a session open the ask can still be the previous session's quote.
+
 The Trading Hours template controls the session and which bars exist. It is part
 of the manifest. The global time zone is not in the manifest, so it remains a
 manual release check.
