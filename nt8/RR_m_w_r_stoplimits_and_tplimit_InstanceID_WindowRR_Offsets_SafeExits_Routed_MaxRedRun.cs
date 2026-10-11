@@ -32,7 +32,8 @@ using System.Text;
 // candle-low stop-limit protection, bar-close take-profit limit. Deliberate
 // divergences are documented in project_memory/DECISIONS.md and README.md,
 // notably the gap-skipped-candle setup fix and emergency invalid-setup exits.
-// The zero-band protective stop-limit remains a live-release blocker.
+// A stop-limit still unfilled 60 seconds after the stop price is observed is
+// cancelled before a market exit. This intentionally changes gap-loss outcomes.
 //
 // Requires: bin\Custom\AddOns\PropRouter.cs
 // -----------------------------------------------------------------------------
@@ -42,6 +43,17 @@ namespace NinjaTrader.NinjaScript.Strategies
     public class RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRoutedMaxRedRun : Strategy
     {
         private Order longOrder;
+        // Stop-limit escape runs independently of Calculate.OnBarClose.
+        private System.Timers.Timer stopFallbackTimer;
+        private int stopFallbackTimerQueued;
+        private DateTime stopTriggeredAt = Core.Globals.MinDate;
+        private bool stopFallbackRequested;
+        private bool stopFallbackSubmitting;
+        private DateTime lastStopFallbackAttempt = Core.Globals.MinDate;
+        private Order stopFallbackOrder;
+        private Order stopFallbackEntryOrder;
+        private readonly Dictionary<Order, int> stopFallbackExecutions = new Dictionary<Order, int>();
+        private string StopFallbackName => $"StopTimeoutExit_{InstanceId}";
         // Bar whose signal produced the currently working entry order. Green/doji
         // bars preserve this setup; a rejected later red signal can invalidate it.
         private DateTime entryOrderBarTime = Core.Globals.MinDate;
@@ -553,9 +565,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Print($"=== Strategy entering REALTIME mode (Instance {InstanceId}, signal={EntrySignalName}) ===");
 
                 RegisterSeat();
+                StartStopFallbackTimer();
             }
             else if (State == State.Terminated)
             {
+                StopStopFallbackTimer();
                 ReleaseSeat();
             }
         }
@@ -732,6 +746,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
         {
+            // Exit protection must run in Unrouted mode and while the seat is paused.
+            if (marketDataUpdate.MarketDataType == MarketDataType.Last)
+                ObserveStopTrigger(marketDataUpdate.Price);
             if (State != State.Realtime || !routerRegistered)
                 return;
 
@@ -999,7 +1016,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 || name.StartsWith("StopLimit_", StringComparison.Ordinal)
                 || name.StartsWith("RR_Limit_", StringComparison.Ordinal)
                 || name.StartsWith("DailyFlatten_", StringComparison.Ordinal)
-                || name.StartsWith("InvalidStopExit_", StringComparison.Ordinal);
+                || name.StartsWith("InvalidStopExit_", StringComparison.Ordinal)
+                || name.StartsWith("StopTimeoutExit_", StringComparison.Ordinal);
         }
 
         private string BuildRouterConfigKey()
@@ -1283,6 +1301,225 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             Print($"[{Time[0]}] [{EntrySignalName}] {(granted ? "✅ routed here" : "↪ not routed here")} — {reason}");
             return granted;
+        }
+
+
+        private void StartStopFallbackTimer()
+        {
+            stopFallbackTimer = new System.Timers.Timer(500);
+            stopFallbackTimer.Elapsed += OnStopFallbackTimer;
+            stopFallbackTimer.Start();
+        }
+
+        private void StopStopFallbackTimer()
+        {
+            if (stopFallbackTimer == null)
+                return;
+            stopFallbackTimer.Stop();
+            stopFallbackTimer.Elapsed -= OnStopFallbackTimer;
+            stopFallbackTimer.Dispose();
+            stopFallbackTimer = null;
+        }
+
+        private void OnStopFallbackTimer(object sender, System.Timers.ElapsedEventArgs e)
+        {
+            if (State != State.Realtime
+                || System.Threading.Interlocked.Exchange(ref stopFallbackTimerQueued, 1) != 0)
+                return;
+            try
+            {
+                TriggerCustomEvent(o =>
+                {
+                    try { CheckStopFallback(); }
+                    finally { System.Threading.Interlocked.Exchange(ref stopFallbackTimerQueued, 0); }
+                }, null);
+            }
+            catch (Exception ex)
+            {
+                System.Threading.Interlocked.Exchange(ref stopFallbackTimerQueued, 0);
+                if (State == State.Realtime)
+                    Print($"[{EntrySignalName}] Stop timeout timer error: {ex.Message}");
+            }
+        }
+
+        private void ObserveStopTrigger(double lastPrice)
+        {
+            if (State != State.Realtime || lastPrice <= 0)
+                return;
+            lock (exitOrdersSync)
+            {
+                if (stopTriggeredAt != Core.Globals.MinDate || stopFallbackRequested)
+                    return;
+                foreach (Order order in stopOrders)
+                {
+                    if (order != null && !Order.IsTerminalState(order.OrderState)
+                        && order.OrderType == OrderType.StopLimit && order.OrderAction == OrderAction.Sell
+                        && order.StopPrice > 0 && lastPrice <= order.StopPrice)
+                    {
+                        stopTriggeredAt = Core.Globals.Now;
+                        Print($"[{stopTriggeredAt}] [{EntrySignalName}] Stop price reached at {lastPrice}; "
+                            + "unfilled stop quantity will exit at market after 60 seconds");
+                        return;
+                    }
+                }
+            }
+        }
+
+        private bool IsStopFallbackActive()
+        {
+            lock (exitOrdersSync)
+                // A stopped-out partial entry can be flat while its unfilled buy
+                // remainder is still live. Keep bar logic from resetting its clock.
+                return stopFallbackRequested || (stopTriggeredAt != Core.Globals.MinDate
+                    && Position.MarketPosition == MarketPosition.Flat
+                    && !IsStopFallbackOrderSettled(stopFallbackEntryOrder));
+        }
+
+        private void ResetStopFallback()
+        {
+            lock (exitOrdersSync)
+            {
+                stopTriggeredAt = Core.Globals.MinDate;
+                stopFallbackRequested = false;
+                stopFallbackSubmitting = false;
+                lastStopFallbackAttempt = Core.Globals.MinDate;
+                stopFallbackOrder = null;
+                stopFallbackEntryOrder = null;
+                stopFallbackExecutions.Clear();
+            }
+        }
+
+        private void RecordStopFallbackExecution(Execution execution, int quantity)
+        {
+            if (execution == null || execution.Order == null || quantity <= 0)
+                return;
+            Order order = execution.Order;
+            if (order.Name != EntrySignalName && order.Name != StopLossSignalName
+                && order.Name != TakeProfitName && order.Name != StopFallbackName)
+                return;
+            lock (exitOrdersSync)
+            {
+                int executed;
+                stopFallbackExecutions.TryGetValue(order, out executed);
+                stopFallbackExecutions[order] = executed + quantity;
+                if (order.Name == StopFallbackName && order.OrderState == OrderState.Filled
+                    && executed + quantity >= order.Filled)
+                    stopFallbackOrder = null;
+            }
+        }
+
+        private bool IsStopFallbackOrderSettled(Order order)
+        {
+            if (order == null)
+                return true;
+            int executed;
+            stopFallbackExecutions.TryGetValue(order, out executed);
+            // A terminal order update can precede its execution callback. Wait for
+            // that callback so Position.Quantity includes fills during cancellation.
+            return Order.IsTerminalState(order.OrderState) && order.Filled <= executed;
+        }
+
+        private void CancelForStopFallback(Order order)
+        {
+            if (order == null || Order.IsTerminalState(order.OrderState)
+                || order.OrderState == OrderState.CancelPending || order.OrderState == OrderState.CancelSubmitted)
+                return;
+            try { CancelOrder(order); }
+            catch (Exception ex)
+            {
+                Print($"[{Core.Globals.Now}] [{EntrySignalName}] Stop timeout cancellation failed "
+                    + $"for {order.Name}: {ex.Message}; will retry");
+            }
+        }
+
+        private void CheckStopFallback()
+        {
+            if (State != State.Realtime)
+                return;
+
+            Order[] stops;
+            Order[] targets;
+            Order entry;
+            DateTime now = Core.Globals.Now; // Follows Playback time as well as live time.
+            lock (exitOrdersSync)
+            {
+                if (stopTriggeredAt == Core.Globals.MinDate && !stopFallbackRequested)
+                    return;
+                if (!stopFallbackRequested)
+                {
+                    if (Position.MarketPosition == MarketPosition.Flat
+                        && IsStopFallbackOrderSettled(stopFallbackEntryOrder))
+                    {
+                        stopTriggeredAt = Core.Globals.MinDate;
+                        return;
+                    }
+                    if ((now - stopTriggeredAt).TotalSeconds < 60)
+                        return;
+                    stopFallbackRequested = true;
+                    Print($"[{now}] [{EntrySignalName}] Stop timeout: cancelling entry/stop/target orders "
+                        + "before selling the remaining position at market");
+                }
+                stops = stopOrders.ToArray();
+                targets = takeProfitOrders.ToArray();
+                entry = stopFallbackEntryOrder;
+            }
+
+            // Never hold our tracking lock over a managed-order API call; it can
+            // synchronously re-enter OnOrderUpdate/OnExecutionUpdate.
+            CancelForStopFallback(entry);
+            foreach (Order order in stops)
+                CancelForStopFallback(order);
+            foreach (Order order in targets)
+                CancelForStopFallback(order);
+
+            int remaining;
+            lock (exitOrdersSync)
+            {
+                if (!IsStopFallbackOrderSettled(stopFallbackEntryOrder))
+                    return;
+                foreach (Order order in stopOrders)
+                    if (!IsStopFallbackOrderSettled(order))
+                        return;
+                foreach (Order order in takeProfitOrders)
+                    if (!IsStopFallbackOrderSettled(order))
+                        return;
+                if (stopFallbackSubmitting || (stopFallbackOrder != null
+                    && (!IsStopFallbackOrderSettled(stopFallbackOrder)
+                        || stopFallbackOrder.OrderState == OrderState.Filled)))
+                    return;
+                if (Position.MarketPosition == MarketPosition.Flat)
+                {
+                    ResetStopFallback();
+                    return;
+                }
+                if (Position.MarketPosition != MarketPosition.Long || Position.Quantity <= 0
+                    || (now - lastStopFallbackAttempt).TotalSeconds < 1)
+                    return;
+                remaining = Position.Quantity;
+                stopFallbackSubmitting = true;
+                lastStopFallbackAttempt = now;
+            }
+
+            try
+            {
+                Order submitted = ExitLong(0, remaining, StopFallbackName, EntrySignalName);
+                lock (exitOrdersSync)
+                {
+                    if (submitted != null && !Order.IsTerminalState(submitted.OrderState))
+                        stopFallbackOrder = submitted;
+                }
+                Print($"[{now}] [{EntrySignalName}] Stop timeout market exit quantity={remaining}: "
+                    + (submitted == null ? "API returned no order; will retry" : submitted.OrderState.ToString()));
+            }
+            catch (Exception ex)
+            {
+                Print($"[{now}] [{EntrySignalName}] Stop timeout market exit failed: {ex.Message}; will retry");
+            }
+            finally
+            {
+                lock (exitOrdersSync)
+                    stopFallbackSubmitting = false;
+            }
         }
 
         private bool ExceedsMaxRedRun()
@@ -1682,7 +1919,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 foreach (Order order in takeProfitOrders)
                     if (IsActiveOrder(order))
                         return true;
-                return false;
+                return IsStopFallbackActive() || IsActiveOrder(stopFallbackOrder);
             }
         }
 
@@ -1713,6 +1950,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             lock (exitOrdersSync)
             {
+                ResetStopFallback();
                 takeProfitSubmitted = false;
                 stopOrders.Clear();
                 takeProfitOrders.Clear();
@@ -1721,6 +1959,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnBarUpdate()
         {
+            if (IsStopFallbackActive())
+                return;
 			if (State != State.Realtime)
 			    return;
 
@@ -1885,6 +2125,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         protected override void OnExecutionUpdate(Execution execution, string executionId,
             double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
         {
+            RecordStopFallbackExecution(execution, quantity);
+            if (IsStopFallbackActive())
+                return;
             if (execution != null && execution.Name == EntrySignalName && quantity > 0)
             {
                 // The candle behind this fill is identified by price. A null result means it
@@ -1932,8 +2175,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                             return;
                         }
 
-                        // Study-compatible zero-band stop-limit. This is NOT guaranteed to fill
-                        // through a gap; see README known limitations before live deployment.
+                        // Preserve the initial zero-band stop-limit; the independent timer
+                        // switches any remaining position to a market exit after 60 seconds.
                         double limitPrice = fillStopPrice;
 
                         Print($"[{time}] [{EntrySignalName}] 🚀 Entry FILLED at {entryPrice} - Submitting STOP-LIMIT immediately");
@@ -2008,6 +2251,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Only track orders that belong to this instance
             if (order.Name == EntrySignalName)
             {
+                lock (exitOrdersSync)
+                    stopFallbackEntryOrder = order;
                 BindEntryOrderSetup(order, null);
                 longOrder = order;
                 ApplyEntryOrderStatus(orderState);
@@ -2015,6 +2260,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (order.Name == StopLossSignalName)
             {
                 TrackOrder(stopOrders, order);
+
+                // A partial fill also confirms triggering if the price tick was missed.
+                if (filled > 0 && filled < quantity)
+                {
+                    lock (exitOrdersSync)
+                        if (stopTriggeredAt == Core.Globals.MinDate)
+                            stopTriggeredAt = Core.Globals.Now;
+                }
 
                 if (orderState == OrderState.Filled)
                     CancelActiveOrders(takeProfitOrders);
@@ -2028,6 +2281,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 if (orderState == OrderState.Filled)
                     CancelActiveOrders(stopOrders);
+            }
+            else if (order.Name == StopFallbackName)
+            {
+                lock (exitOrdersSync)
+                    stopFallbackOrder = order;
+                if (error != ErrorCode.NoError || orderState == OrderState.Rejected)
+                    Print($"[{time}] [{EntrySignalName}] Stop timeout market order error: {error} {nativeError}");
             }
 
             if (order.Name == StopLossSignalName || order.Name == TakeProfitName)
