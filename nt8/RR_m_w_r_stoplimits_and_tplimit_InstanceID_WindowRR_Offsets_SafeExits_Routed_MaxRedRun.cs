@@ -43,6 +43,11 @@ namespace NinjaTrader.NinjaScript.Strategies
     public class RRLongTimeWinStopLimitTPlimitGAPWindowRROffsetsSafeExitsRoutedMaxRedRun : Strategy
     {
         private Order longOrder;
+        private Order entryTimeoutOrder;
+        private DateTime entryTriggeredAt = Core.Globals.MinDate;
+        private bool entryTimeoutCancelRequested;
+        private DateTime lastEntryTimeoutCancelAttempt = Core.Globals.MinDate;
+        private int entryTimeoutExecuted;
         // Stop-limit escape runs independently of Calculate.OnBarClose.
         private System.Timers.Timer stopFallbackTimer;
         private int stopFallbackTimerQueued;
@@ -543,6 +548,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Realtime)
             {
+                ResetEntryTimeoutTracking();
                 longOrder = null;
                 ClearEntrySetupBindings();
                 pendingStopPrice = 0;
@@ -748,7 +754,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             // Exit protection must run in Unrouted mode and while the seat is paused.
             if (marketDataUpdate.MarketDataType == MarketDataType.Last)
+            {
+                ObserveEntryTrigger(marketDataUpdate.Price);
                 ObserveStopTrigger(marketDataUpdate.Price);
+            }
             if (State != State.Realtime || !routerRegistered)
                 return;
 
@@ -1206,7 +1215,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (routerSeatStatus != SeatStatus.InPosition)
                 {
                     if (state == OrderState.Cancelled || state == OrderState.Rejected)
-                        routerSeatStatus = PositionAccount != null
+                        routerSeatStatus = IsEntryTimeoutCancellationPending()
+                            ? SeatStatus.Pending
+                            : PositionAccount != null
                             && PositionAccount.MarketPosition != MarketPosition.Flat
                             ? SeatStatus.InPosition : SeatStatus.Free;
                     else if (state == OrderState.Filled || IsActiveOrderState(state))
@@ -1304,6 +1315,116 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
 
+
+        private void ResetEntryTimeoutTracking()
+        {
+            lock (exitOrdersSync)
+            {
+                entryTimeoutOrder = null;
+                entryTriggeredAt = Core.Globals.MinDate;
+                entryTimeoutCancelRequested = false;
+                lastEntryTimeoutCancelAttempt = Core.Globals.MinDate;
+                entryTimeoutExecuted = 0;
+            }
+        }
+
+        private void TrackEntryTimeoutOrder(Order order, OrderState state, int filled, int quantity)
+        {
+            lock (exitOrdersSync)
+            {
+                if (entryTimeoutOrder != order)
+                {
+                    // Ignore late terminal callbacks for an older entry. A new
+                    // live Order object starts a new watch; repricing the same
+                    // object preserves its original trigger and deadline.
+                    if (Order.IsTerminalState(state))
+                        return;
+                    ResetEntryTimeoutTracking();
+                    entryTimeoutOrder = order;
+                }
+                if (filled > 0 && filled < quantity && entryTriggeredAt == Core.Globals.MinDate)
+                    entryTriggeredAt = Core.Globals.Now;
+            }
+        }
+
+        private void RecordEntryTimeoutExecution(Execution execution, int quantity)
+        {
+            if (execution == null || execution.Order == null || quantity <= 0)
+                return;
+            lock (exitOrdersSync)
+                if (execution.Order == entryTimeoutOrder)
+                    entryTimeoutExecuted += quantity;
+        }
+
+        private void ObserveEntryTrigger(double lastPrice)
+        {
+            if (State != State.Realtime || lastPrice <= 0)
+                return;
+            lock (exitOrdersSync)
+            {
+                Order order = entryTimeoutOrder;
+                if (order == null || Order.IsTerminalState(order.OrderState)
+                    || order.OrderType != OrderType.StopLimit || order.OrderAction != OrderAction.Buy
+                    || order.StopPrice <= 0 || lastPrice < order.StopPrice
+                    || entryTriggeredAt != Core.Globals.MinDate)
+                    return;
+                entryTriggeredAt = Core.Globals.Now;
+                Print($"[{entryTriggeredAt}] [{EntrySignalName}] Buy stop price reached at {lastPrice}; "
+                    + "unfilled entry quantity will be cancelled after 25 minutes");
+            }
+        }
+
+        private bool IsEntryTimeoutSettled()
+        {
+            return entryTimeoutOrder == null || (Order.IsTerminalState(entryTimeoutOrder.OrderState)
+                && entryTimeoutOrder.Filled <= entryTimeoutExecuted);
+        }
+
+        private bool IsEntryTimeoutCancellationPending()
+        {
+            lock (exitOrdersSync)
+                return entryTimeoutCancelRequested && !IsEntryTimeoutSettled();
+        }
+
+        private void CheckEntryTimeout()
+        {
+            if (State != State.Realtime)
+                return;
+            Order order;
+            DateTime now = Core.Globals.Now;
+            lock (exitOrdersSync)
+            {
+                order = entryTimeoutOrder;
+                if (order == null)
+                    return;
+                if (Order.IsTerminalState(order.OrderState))
+                {
+                    // Let executions that raced the cancel reach position/stop
+                    // management before allowing another entry.
+                    if (IsEntryTimeoutSettled())
+                        ResetEntryTimeoutTracking();
+                    return;
+                }
+                if (entryTriggeredAt == Core.Globals.MinDate || (now - entryTriggeredAt).TotalMinutes < 25)
+                    return;
+                if (!entryTimeoutCancelRequested)
+                {
+                    entryTimeoutCancelRequested = true;
+                    Print($"[{now}] [{EntrySignalName}] Entry timeout after 25 minutes: cancelling "
+                        + $"unfilled buy quantity={Math.Max(0, order.Quantity - order.Filled)}");
+                }
+                if (order.OrderState == OrderState.CancelPending || order.OrderState == OrderState.CancelSubmitted
+                    || (now - lastEntryTimeoutCancelAttempt).TotalSeconds < 1)
+                    return;
+                lastEntryTimeoutCancelAttempt = now;
+            }
+            try { CancelOrder(order); }
+            catch (Exception ex)
+            {
+                Print($"[{now}] [{EntrySignalName}] Entry timeout cancellation failed: {ex.Message}; will retry");
+            }
+        }
+
         private void StartStopFallbackTimer()
         {
             stopFallbackTimer = new System.Timers.Timer(500);
@@ -1330,7 +1451,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 TriggerCustomEvent(o =>
                 {
-                    try { CheckStopFallback(); }
+                    try
+                    {
+                        CheckStopFallback();
+                        CheckEntryTimeout();
+                    }
                     finally { System.Threading.Interlocked.Exchange(ref stopFallbackTimerQueued, 0); }
                 }, null);
             }
@@ -1964,6 +2089,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (State != State.Realtime)
 			    return;
 
+            CheckEntryTimeout();
+
             // Keep the registry current even on bars that produce no signal.
             PublishEquity();
             ApplySeatPause();
@@ -2007,6 +2134,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 
             if (Position.MarketPosition != MarketPosition.Flat)
+                return;
+
+            if (IsEntryTimeoutCancellationPending())
                 return;
 
             // 🔹 TRADE WINDOW (ENTRY ONLY)
@@ -2125,6 +2255,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         protected override void OnExecutionUpdate(Execution execution, string executionId,
             double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
         {
+            RecordEntryTimeoutExecution(execution, quantity);
             RecordStopFallbackExecution(execution, quantity);
             if (IsStopFallbackActive())
                 return;
@@ -2251,6 +2382,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Only track orders that belong to this instance
             if (order.Name == EntrySignalName)
             {
+                TrackEntryTimeoutOrder(order, orderState, filled, quantity);
                 lock (exitOrdersSync)
                     stopFallbackEntryOrder = order;
                 BindEntryOrderSetup(order, null);
