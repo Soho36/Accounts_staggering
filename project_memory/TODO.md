@@ -7,19 +7,21 @@ archiving them here.
 
 ## Blocking the next live session
 
-### 1. Confirm the deployed revision and the seat-status self-heal
-The live-flatness, runtime-orphan and shutdown-reconciliation fixes are in source
-but have not yet been validated in a newly compiled NinjaTrader session.
-- [ ] Confirm NinjaTrader has the current source; rebuild in the NinjaScript
-      Editor if necessary.
-- [ ] Confirm all six seats register and seed.
-- [ ] After the first completed trade, confirm that seat returns to `Free` in the
-      next decision's ranking rather than staying `InPosition`.
-- [ ] Watch for `⚠️ releasing an unbacked InPosition reservation` — that means the
-      latch still forms and the self-heal is masking it.
+### 1. GG rollout (routed GG on its own router)
+Generated, compiled and router-tested 2026-10-15; nothing deployed yet.
+- [ ] Choose the GG accounts and fill `BOOKS["GG"]`, plus `BOOKS["GG_SIM"]` with
+      NEW simulation accounts, in `nt8/make_peak_file.py`. Size K from DECISIONS
+      2026-10-15: K=4 at R:R 1.0, K=5 above it.
+- [ ] Copy `PropRouterGG.cs` to `bin\Custom\AddOns\` and the routed GG to
+      `bin\Custom\Strategies\`; compile in the NinjaScript Editor.
+- [ ] `python make_peak_file.py --book GG_SIM --install`, full NT8 restart;
+      confirm every GG seat registers and seeds, and that an account also listed
+      in an RTL peak file is refused with "is an RTL router seat".
+- [ ] Run the release gate (`nt8/README.md`) on the GG simulation book, then a
+      live GG book.
 
-**Acceptance:** a full session where `eligible` never reaches `0/6` while
-accounts are flat.
+**Acceptance:** a full Playback session where GG routes green signals across its
+own seats, RTL is unaffected, and `python nt8/gg_sync.py` reports no drift.
 
 ### 2. Playback-test the exact-id orphan exception
 The source now applies the same narrow rule at startup and runtime.
@@ -55,12 +57,15 @@ The claim "live reproduces the study" is untested end to end.
 - [ ] Confirm the chosen seat matches on every decision.
 - [ ] Any divergence is a bug in one of the two.
 
-### 5. Zero-band stop-limit gap
-Live-release blocker. `stop == limit` may not fill on a gap through the level.
-- [ ] Gap a Playback session through the stop price.
-- [ ] Document whether it fills, and by how much it slips if it does.
-- [ ] If it fails, design a mitigation that does not change fill behaviour on the
-      entry side.
+### 5. Playback-test the stop-limit timeouts (zero-band gap mitigation)
+Live-release blocker. Since 2026-10-12 a triggered-but-unfilled protective
+stop-limit is replaced by a market exit after 60 s, and a triggered-but-unfilled
+entry is cancelled after 25 min (`RT30_min_nt8_standalone/STOP_TIMEOUT.md`).
+Present in routed RTL and GG; only harness-tested.
+- [ ] Gap a Playback session through a protective stop; confirm cancellation,
+      the market exit, and that the seat stays busy until flat.
+- [ ] Trigger an entry without a fill; confirm cancellation at 25 minutes and
+      that the seat is released.
 
 ### 6. Complete the Playback release gate
 `nt8/README.md` holds the checklist. Not yet run end to end on six distinct

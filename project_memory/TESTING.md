@@ -10,33 +10,32 @@ code; most of it exists because a check was missing when something broke.
 Run after changes to the study, peak helper or their tests:
 
 ```powershell
-python -m unittest discover -s tests -v
+& .\venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Current expected result: `Ran 24 tests` and `OK`.
+Current expected result: `Ran 43 tests` and `OK` (2026-10-15).
 
-Host note (2026-08-28): the physical workspace is
-`I:\PycharmProjects\Accounts_staggering\`; a Windows compatibility/junction path
-may be displayed as `C:\Users\Liikurserv\PycharmProjects\Accounts_staggering\`.
-That alias is not a second project. Independently, `venv\pyvenv.cfg` points to the
-now-missing base interpreter
-`C:\Users\Liikurserv\AppData\Local\Programs\Python\Python39`, while system Python
-3.12 does not have NumPy/Pandas. Repair/recreate the venv from the physical `I:`
-workspace before treating a skipped rerun as a passing result.
+Use the project venv (see `I:\PycharmProjects\AGENTS.md`); system Python lacks
+NumPy/Pandas. The workspace is `I:\PycharmProjects\Accounts_staggering\`; the
+`C:\Users\Liikurserv\PycharmProjects\...` path is a junction to the same files.
 
 ---
 
 ## Router regression suite
 
-Compiles the **real** `PropRouter.cs` against a minimal NinjaTrader stub and runs
-16 cases. Fast; run it after any change to `PropRouter.cs`.
+Compiles the **real** router against a minimal NinjaTrader stub and runs its
+regression cases. Fast; run both after any change to `PropRouter.cs`, since GG is
+generated from it.
 
 ```powershell
 cd nt8\tests
-.\run-router-tests.ps1
+.\run-router-tests.ps1              # RTL: Result: 16 passed, 0 failed
+.\run-router-tests.ps1 -Router GG   # GG: 16 passed, then 7 passed (cross-router guard)
 ```
 
-Expected: `Result: 15 passed, 0 failed`.
+Uses Visual Studio's `csc.exe` when installed, otherwise NinjaTrader's bundled
+Roslyn (Visual Studio Build Tools were gone as of 2026-10-15). An antivirus can
+hold a freshly built test executable; if the first run prints no results, rerun.
 
 Covers: durable peak-row preservation, strict CSV parsing, manifest/quorum
 readiness, atomic pending reservations, delayed-winner revalidation, transient
@@ -47,31 +46,38 @@ fills, rejections and position lifecycle are *not* covered — those need Playba
 
 ---
 
-## Syntax-checking C# without NinjaTrader
+## Compiling NinjaScript without the NinjaScript Editor
 
-NinjaTrader cannot be driven from the agent environment, and the NinjaScript
-Editor is the only real compiler. Roslyn still catches syntax and name errors:
+NinjaTrader cannot be driven from the agent environment, but its compiler can:
 
 ```powershell
-$csc = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe'
-$out = & $csc /nologo /t:library /out:"$env:TEMP\chk.dll" 'nt8\<file>.cs' 2>&1
-$all = $out | Where-Object { $_ -match 'error CS' }
-$syn = $all | Where-Object { $_ -notmatch 'CS0246|CS0234|CS0518|CS1069|CS0400' }
-Write-Output ("total {0}  non-missing-type {1}" -f $all.Count, $syn.Count)
+nt8\tests\compile-nt8.ps1
 ```
 
-**Interpretation:** a few hundred `CS0246`-class errors are expected — those are
-the missing NinjaTrader assemblies. What matters is `non-missing-type = 0`.
-Anything else is a real error.
+A real compile, not a syntax filter: NinjaTrader's bundled Roslyn against the
+installed NT8 assemblies in `C:\Program Files\NinjaTrader 8\bin`. By default it
+compiles both routers and both routed strategies **together**, which also proves
+RTL and GG can coexist in one Custom folder. Expected:
+`Result: 0 error(s), 0 source warning(s)`. Pass `-Sources` for other files.
 
-This has caught a duplicated 86-line block (`CS0111`) that a text-anchor edit
-introduced. Always run it after scripted edits to a `.cs` file.
+It does not run the managed-order engine. A syntax check once caught a duplicated
+86-line block (`CS0111`) introduced by a text-anchor edit; run this after every
+scripted edit to a `.cs` file.
 
-Also check brace balance after any block edit:
+---
+
+## GG generation
 
 ```bash
-python -c "import io;s=io.open('nt8/<file>.cs',encoding='utf-8').read();print(s.count('{')==s.count('}'))"
+python nt8/gg_sync.py
 ```
+
+Expected: `Transform self-test ... PASS`, the three mirrored comparisons, and
+`up to date` for all three GG files (exit 0). After changing any RTL source run
+`python nt8/gg_sync.py --write`, review the diff, then compile and run both router
+suites. A `FAIL` self-test means the standalone GG in `RT30_min_nt8_standalone`
+no longer equals the RR→GG transform of the standalone RR: GG's definition
+changed upstream and needs a human decision.
 
 ---
 
@@ -82,7 +88,7 @@ Before any live session, confirm the seeds still match the broker:
 ```bash
 cd nt8
 python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv   # 0 = matches source, 1 = mismatch
-python make_peak_file.py --seats sim --check peaks_SIM.csv
+python make_peak_file.py --book SIM --check peaks_SIM.csv
 ```
 
 Use a freshly exported statement: exit `0` proves equality with the supplied
@@ -92,7 +98,7 @@ modes it catches, each of which has occurred:
 
 | Symptom | Cause |
 |---|---|
-| implied drawdown ≠ configured | wrong `SEAT_CONFIG` dd, or an edited/stale statement |
+| implied drawdown ≠ configured | wrong seat-table dd, or an edited/stale statement |
 | frozen threshold ≠ `start + 100` | wrong start balance |
 | modelled floor below the EOD floor | would overstate headroom — refused |
 | rows split into wrong field count | Excel wrote comma decimals on a non-invariant locale |

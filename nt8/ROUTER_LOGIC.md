@@ -71,34 +71,36 @@ provide one, by design, because the study did not model one.
 
 ## How long an entry order lives
 
-An entry order is valid for **exactly one bar**: the bar that follows the red
-candle that produced it.
+An entry order stays working until one of these happens:
 
-At every bar close the strategy either
+- **A new valid signal candle** re-prices it in place to that candle's high/low.
+  This is a continuation, not a new copy, and does not consume a router slot.
+- **A non-signal bar** (for RTL a green or doji candle) leaves it untouched,
+  matching the standalone strategy and MT5.
+- **A signal candle that is rejected** - run cap exceeded, invalid R:R or candle
+  risk, or a gap above the entry - cancels it:
+  `⏱ Entry from <time> invalidated by rejected red signal → cancelling pending order`.
+- **25 minutes after the price first traded through the entry without a fill**,
+  it is cancelled: `Entry timeout after 25 minutes: cancelling ...`. The clock
+  starts at the first observed trigger, not at the bar open.
+- **The trade window closes.**
 
-- **renews** it — this bar is also a valid red-candle signal, so the working order
-  is re-priced in place to the new candle's high/low (this is a continuation, not
-  a new copy, and does not consume a router slot); or
-- **cancels** it — this bar produced no signal (not red, invalid R:R or candle
-  risk, or a gap above the entry), so the order has expired.
+The order is never converted to a market buy. Until its cancellation is
+confirmed the seat stays `Pending`, and at R=1 a single `Pending` seat blocks the
+entire book. GG behaves identically with the colours swapped.
 
-The order also cancels when the trade window closes.
-
-Look for `⏱ Entry from <time> not renewed by this bar → cancelling stale order`.
-That line is normal, not a fault.
-
-**Why this rule exists.** With all 23 windows enabled the window almost never
-closes, so before this rule an unfilled entry could stay working indefinitely at
-a stale price. On 2026-09-03 the 15:00 signal on seat 1 was never renewed; the
-order sat at 29174 for nearly three hours while price had already moved away.
-The seat stayed `Pending` the whole time, and at R=1 a single `Pending` seat
-blocks the entire book.
+**Why the 25-minute expiry exists.** On 2026-09-03 a 15:00 entry on seat 1 was
+jumped over without filling and then sat working at a stale 29174 for nearly
+three hours, holding the book `Pending`. A first fix expired every entry after
+one bar, but the standalone strategy and MT5 keep a pending entry across
+non-signal bars, so it was replaced: the trigger-based 25-minute expiry cancels a
+jumped-over entry without that divergence.
 
 **Never cancel a strategy's entry order by hand.** Doing so on 2026-09-03 left
 NinjaTrader's managed entry tracking for that signal name unable to accept
 another entry: every later submission returned `⛔ entry API returned no Order
 object` for the rest of the session. If it happens, restart that one strategy
-instance (disable and re-enable the chart) — a peak-file reseed will not help.
+instance (disable and re-enable the chart) - a peak-file reseed will not help.
 
 ## Eligibility — a Free seat can still be skipped
 
@@ -229,6 +231,27 @@ profit will look worse than it is.
 
 Until a seat's floor freezes (`peak >= start + dd + 100`), maximising MFE
 give-back is the fastest way to burn a container without losing a single trade.
+
+## Two routers: RTL and GG
+
+RTL charts register with `PropRouter`; GG charts with `PropRouterGG`. They are
+separate registries with separate state folders (`PropRouter\` and
+`PropRouterGG\`), so the same Book ID in both would still be two unrelated books.
+Everything on this page applies to each router on its own: a GG decision never
+looks at an RTL seat, and the reverse.
+
+An account can sit in only one book across both. If a GG seat's account is listed
+in any RTL peak file, GG refuses to register it:
+
+```
+account 'PA-APEX-...' is an RTL router seat (listed in ...\PropRouter\peaks_LIVE.csv);
+one account is one drawdown container and cannot trade in both the RTL and GG routers
+```
+
+That GG book then never reaches quorum, while RTL trades normally. Fix the seat
+tables in `make_peak_file.py`, which refuses the same overlap, and reinstall. A
+stale peak file left in the RTL folder, such as an old `peaks_SIM.csv`, also
+counts; move it out if its book is retired.
 
 ## Temporarily excluding one account (payout requests)
 

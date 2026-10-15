@@ -29,6 +29,27 @@ copies and picks *which* signals vanish. Source: `results/signal_routing.md`.
 **Decision:** Default to `K = 5R` rather than the K that looked best pre-2023.
 **Reason:** The fitted extra-seat count did not survive the holdout.
 
+### 2026-10-15 — K is sized per strategy; GG needs more seats than RTL
+
+**Decision:** Measure the capacity boundary separately for each signal stream
+before sizing its book.
+**Reason:** Same method (`signal_router.capacity_measure`, every seat always
+eligible, 2020 – 2026-07, R=1, R:R 1.0), missed signals:
+
+| Stream | offers | peak overlap | K=2 | K=3 | K=4 | K=5 | K=6 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| RTL (RR) | 12,658 | 5 | 4.3% | 0.48% | 0.02% | 0 | 0 |
+| GG | 21,563 | 6 | 17.5% | 4.1% | 0.67% | 0.06% | 0 |
+
+GG fires 70% more signals and holds longer (median 1.13 h vs 0.93 h). Overlap
+grows with R:R: at 1.5, GG misses 2.1% at K=4 and 0.37% at K=5, while RTL at K=3
+stays under 1%.
+**Consequence:** RTL baskets of K=3 are defensible (about 9 missed signals a
+year). GG needs K=4 at R:R 1.0 and K=5 above it. Every figure assumes all seats
+stay eligible; a paused, low-headroom or replaced seat lowers effective K, so a
+spare seat matters most at small K.
+**Reconsider if:** either strategy's rules, timeframe or R:R change.
+
 ---
 
 ## Account model
@@ -174,6 +195,45 @@ verification is done offline by `make_peak_file.py --check` instead.
 **Reason:** Per-book state keeps a Playback book from writing into the live
 book's peaks. The charset restriction makes the filename sanitiser a no-op, so a
 Book ID can never silently map to a different filename.
+
+### 2026-10-15 — GG gets its own router, generated from the RTL one
+
+**Decision:** GG runs on `PropRouterGG.cs`, a separate router class, rather than as
+another Book ID on `PropRouter`. `PropRouterGG.cs` and the routed GG strategy are
+*generated* by `nt8/gg_sync.py` from the RTL sources and never edited by hand.
+**Reason:** User decision: leave the working RTL router untouched and isolated
+while GG is trialled; pooling across strategies may follow once both are proven.
+Generating instead of copying makes every RTL fix reach GG and makes drift
+detectable (`python gg_sync.py` exits 1).
+**Consequences** (each prevents a defect a plain copy would have had):
+- Router types are GG-suffixed (`PropRouterGG`, `SeatStatusGG`,
+  `PropRouterModeGG`, ...), not merely namespaced: NinjaTrader serializes
+  strategy properties, and two enums sharing a simple name break that.
+- State folder `Documents\NinjaTrader 8\PropRouterGG`, so peak files, routing logs
+  and blocked-order lists cannot collide with RTL's even under the same Book ID.
+- The in-router "one account, one book" check cannot see into another router
+  class, so `PropRouterGG.Register` refuses any account listed in an RTL peak file
+  and fails closed if those files cannot be read. The guard is GG-side only, so
+  RTL stays unchanged; a collision always stops GG and never double-books an
+  account. `make_peak_file.py` enforces the same rule across all seat tables.
+- The RR→GG strategy transform mirrors **every** Close/Open comparison. The
+  standalone transform in `RT30_min_nt8_standalone/verify_stop_timeout.ps1`
+  replaces two literal lines; applied to the routed source it would miss two of
+  three comparisons (the rejected-signal cancellation and the not-a-signal early
+  return), leaving GG cancelling its entries on red candles. `gg_sync.py`
+  refuses to run if an `Open[...]` use is not a recognised comparison, and
+  self-tests the transform against the standalone RR/GG pair.
+
+### 2026-10-15 — Statement rows outside the selected book are skipped, not rejected
+
+**Decision:** `make_peak_file.py` builds one book from a statement that may list
+every account; rows of other books, and accounts in no book, are skipped and
+printed.
+**Reason:** One Apex export covers every account across the RTL and GG books.
+Rejecting unknown rows forced hand-editing the statement, which the tool exists
+to prevent. Safety is unchanged: every seat of the selected book must still be
+present and pass every check, so a typo in a seat table still fails as a missing
+seat.
 
 ### 2026-08-28 — Live policy remains `max_headroom`, not `protect_frozen`
 

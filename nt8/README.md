@@ -17,12 +17,36 @@ especially before creating or editing a peak file.
 | File | NinjaTrader location |
 |---|---|
 | `PropRouter.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
-| `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits_Routed.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` |
+| `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits_Routed_MaxRedRun.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` — the live RTL build |
+| `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits_Routed.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` — earlier RTL build, no MaxRedRun cap or stop timeouts |
+| `PropRouterGG.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` — GG router, **generated** |
+| `GG_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits_Routed_MaxGreenRun.cs` | `Documents\NinjaTrader 8\bin\Custom\Strategies\` — routed GG, **generated** |
+| `gg_sync.py` | generates/drift-checks the two GG files from the RTL ones; run locally |
 | `FIRST_START.md` | operator checklist; read before creating the book or peak file |
 | `ROUTER_LOGIC.md` | how allocation decisions are made; read before judging a log |
 | `make_peak_file.py` | builds/verifies `peaks_<BOOK>.csv` from a broker statement; run locally, not in NinjaTrader |
 | `routing_report.py` | renders `routing_<BOOK>_<date>.csv` as a self-contained HTML session report; run locally, not in NinjaTrader |
 | `tests\*` | local regression harness only; do not copy into NinjaTrader |
+
+### GG: second strategy, second router
+
+GG is the green-candle strategy (`Close > Open`), otherwise identical in entry,
+stop, target, windows and timeouts. It runs on its own router, `PropRouterGG`,
+with its own state folder `Documents\NinjaTrader 8\PropRouterGG\`, so nothing a
+GG book does can touch RTL state. One account may belong to only one book across
+both routers: `PropRouterGG` refuses any account listed in an RTL peak file.
+
+**Never edit the two GG files.** They are regenerated from the RTL sources:
+
+```bash
+python gg_sync.py           # verify (exit 1 on drift)
+python gg_sync.py --write   # after changing an RTL source; review the diff
+```
+
+Deploy both, compile in the NinjaScript Editor, and seed GG books with
+`make_peak_file.py --book GG ...`, which installs into the GG folder
+automatically. Size GG books from DECISIONS 2026-10-15 in `project_memory`:
+GG needs more seats than RTL for the same miss rate.
 
 The routed strategy is derived from
 `RR_m_w_r_stoplimits_and_tplimit_InstanceID_WindowRR_Offsets_SafeExits(EXAMPLE).cs`,
@@ -349,11 +373,17 @@ flag and the failure modes are in [FIRST_START.md](FIRST_START.md) section 3.
 # live book, from a broker statement, written into NinjaTrader
 python make_peak_file.py Broker_statement.csv --book LIVE --install
 
+# GG live book: same statement, written into the PropRouterGG folder
+python make_peak_file.py Broker_statement.csv --book GG --install
+
 # simulation book, no statement needed (untraded accounts only)
-python make_peak_file.py --seats sim --book SIM --install
+python make_peak_file.py --book SIM --install
 
 # verify an existing file against a freshly exported statement (0 match, 1 mismatch)
-python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv
+python make_peak_file.py Broker_statement.csv --book LIVE --check peaks_LIVE.csv
+
+# every book with its router, folder and seats
+python make_peak_file.py --list-books
 ```
 
 The seed is the broker's `Auto Liquidate Peak Balance`, used unmodified. The
