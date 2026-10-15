@@ -30,13 +30,23 @@ modelled floor sits at or above the broker's real floor and headroom is
 understated, never overstated. The script proves that inequality per row and
 reports the size of the gap.
 
+Every Book ID has its own seat table in BOOKS below. --book picks the table,
+which also decides the router folder --install writes to (RTL books go to
+PropRouter, GG books to PropRouterGG) and whether a broker statement is needed.
+
 Usage:
-    python make_peak_file.py Broker_statement.csv --book LIVE               ---> Live book, write locally
-    python make_peak_file.py Broker_statement.csv --book LIVE --install     ---> Live book, write into NinjaTrader
-    python make_peak_file.py --seats sim --book SIM --install               ---> Simulation book
-    python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv    ---> Compare with a fresh statement
-    python make_peak_file.py --seats sim --check peaks_SIM.csv              ---> Verify a simulation file
+    python make_peak_file.py Broker_statement.csv --book LIVE               ---> RTL live book, write locally
+    python make_peak_file.py Broker_statement.csv --book LIVE --install     ---> RTL live book, write into NinjaTrader
+    python make_peak_file.py Broker_statement.csv --book GG --install       ---> GG live book (PropRouterGG folder)
+    python make_peak_file.py --book SIM --install                           ---> Simulation book, no statement
+    python make_peak_file.py Broker_statement.csv --book LIVE --check "<NT8 dir>\PropRouter\peaks_LIVE.csv"
+    python make_peak_file.py --book SIM --check peaks_SIM.csv               ---> Verify a simulation file
+    python make_peak_file.py --list-books                                   ---> Show every book and its router
     python make_peak_file.py ... --allow-peak-reset                         ---> Deliberate reset only
+
+One broker statement covers every book: rows for other books' accounts, and
+accounts in no book, are skipped and listed. Every seat of the selected book
+must be present in the statement.
 """
 
 from __future__ import print_function
@@ -52,44 +62,92 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 # ---------------------------------------------------------------------------
-# start / dd MUST equal the "Seat starting balance" and "Seat trailing drawdown"
-# properties on the matching NT8 chart. The router compares the CSV values with
-# the chart values using an exact != test and refuses the seat on any mismatch.
-# These are per-seat: differing drawdowns across the book are expected and fine.
+# One seat table per Book ID. --book picks the table; the table decides which
+# router folder --install writes to and where the seeds come from.
 #
-# "kind" is how the BROKER runs the account, not how the router models it. The
-# router models every seat as intraday.
+#   "router"  "RTL" -> Documents\NinjaTrader 8\PropRouter    (PropRouter.cs)
+#             "GG"  -> Documents\NinjaTrader 8\PropRouterGG  (PropRouterGG.cs)
+#   "source"  "statement" -> needs a broker statement; every number is verified
+#             "untraded"  -> peak = start from this table alone; correct ONLY for
+#                            accounts that have never traded (fresh sim accounts)
+#   "seats"   start / dd MUST equal the "Seat starting balance" and "Seat trailing
+#             drawdown" properties on the matching chart. The router compares the
+#             CSV values with the chart values using an exact != test and refuses
+#             the seat on any mismatch. These are per-seat: differing drawdowns
+#             across a book are expected and fine. Instance IDs run 1..N within
+#             each book, independently of every other book.
+#
+#             "kind" is how the BROKER runs the account, not how the router models
+#             it. The router models every seat as intraday.
+#
+# One account belongs to at most ONE book across BOTH routers: one account is one
+# drawdown container. Every run checks that across all tables, not just --book.
+# A book with no seats yet is allowed here, but cannot be built until filled in.
 # ---------------------------------------------------------------------------
-SEAT_CONFIG = {
-    "PA-APEX-240737-17": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
-    "PA-APEX-240737-18": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
-    "PA-APEX-240737-16": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
-    "PA-APEX-240737-13": {"instance": 4, "start": "50000", "dd": "2000", "kind": "eod"},
-    "PA-APEX-240737-14": {"instance": 5, "start": "50000", "dd": "2000", "kind": "intraday"},
-    "PA-APEX-240737-15": {"instance": 6, "start": "50000", "dd": "2500", "kind": "intraday"},
+BOOKS = {
+    "LIVE": {
+        "router": "RTL",
+        "source": "statement",
+        "seats": {
+            "PA-APEX-240737-17": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-18": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-16": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-13": {"instance": 4, "start": "50000", "dd": "2000", "kind": "eod"},
+            "PA-APEX-240737-14": {"instance": 5, "start": "50000", "dd": "2000", "kind": "intraday"},
+            "PA-APEX-240737-15": {"instance": 6, "start": "50000", "dd": "2500", "kind": "intraday"},
+        },
+    },
+
+    # Simulation book. The drawdowns mirror the live mix (1500/1500/2000/2000/2000/2500)
+    # so Playback exercises the same max_headroom ranking dynamics as the real book.
+    #
+    # "start" must equal the SIM account's actual starting balance in NinjaTrader, not
+    # the live tier - the router measures headroom against real account equity. The
+    # start balance does not affect the dynamics anyway: a seat freezes once its peak
+    # reaches start + dd + frozen_offset, so the distance to freeze is dd + 100
+    # regardless of where the account starts.
+    #
+    # Every seat is "intraday" here: the router models all seats that way, and a
+    # simulation account has no end-of-day broker rule to reproduce.
+    "SIM": {
+        "router": "RTL",
+        "source": "untraded",
+        "seats": {
+            "SIM101": {"instance": 1, "start": "100000", "dd": "1500", "kind": "intraday"},
+            "SIM102": {"instance": 2, "start": "100000", "dd": "1500", "kind": "intraday"},
+            "SIM103": {"instance": 3, "start": "100000", "dd": "2000", "kind": "intraday"},
+            "SIM104": {"instance": 4, "start": "100000", "dd": "2000", "kind": "intraday"},
+            "SIM105": {"instance": 5, "start": "100000", "dd": "2000", "kind": "intraday"},
+            "SIM106": {"instance": 6, "start": "100000", "dd": "2500", "kind": "intraday"},
+        },
+    },
+
+    # GG live book, routed by PropRouterGG. Add each account exactly as it appears
+    # in the broker statement, with Instance IDs 1..N for this book alone.
+    "GG": {
+        "router": "GG",
+        "source": "statement",
+        "seats": {
+        },
+    },
+
+    # GG simulation book for Playback testing. It needs its OWN simulation accounts:
+    # SIM101-SIM106 already belong to the RTL "SIM" book, and the GG router refuses
+    # any account listed in an RTL peak file.
+    "GG_SIM": {
+        "router": "GG",
+        "source": "untraded",
+        "seats": {
+        },
+    },
 }
 
-# Simulation book. The drawdowns mirror the live mix (1500/1500/2000/2000/2000/2500)
-# so Playback exercises the same max_headroom ranking dynamics as the real book.
-#
-# "start" must equal the SIM account's actual starting balance in NinjaTrader, not
-# the live tier - the router measures headroom against real account equity. The
-# start balance does not affect the dynamics anyway: a seat freezes once its peak
-# reaches start + dd + frozen_offset, so the distance to freeze is dd + 100
-# regardless of where the account starts.
-#
-# Every seat is "intraday" here: the router models all seats that way, and a
-# simulation account has no end-of-day broker rule to reproduce.
-SEAT_CONFIG_SIM = {
-    "SIM101": {"instance": 1, "start": "100000", "dd": "1500", "kind": "intraday"},
-    "SIM102": {"instance": 2, "start": "100000", "dd": "1500", "kind": "intraday"},
-    "SIM103": {"instance": 3, "start": "100000", "dd": "2000", "kind": "intraday"},
-    "SIM104": {"instance": 4, "start": "100000", "dd": "2000", "kind": "intraday"},
-    "SIM105": {"instance": 5, "start": "100000", "dd": "2000", "kind": "intraday"},
-    "SIM106": {"instance": 6, "start": "100000", "dd": "2500", "kind": "intraday"},
-}
+# Router -> its state folder under Documents\NinjaTrader 8.
+ROUTER_FOLDERS = {"RTL": "PropRouter", "GG": "PropRouterGG"}
+SOURCES = ("statement", "untraded")
 
-SEAT_CONFIGS = {"live": SEAT_CONFIG, "sim": SEAT_CONFIG_SIM}
+# Retired --seats values, kept so existing commands keep working.
+LEGACY_SEATS = {"live": "LIVE", "sim": "SIM"}
 
 # Must be identical on every chart: it is part of the book manifest fingerprint.
 FROZEN_OFFSET = Decimal("100")
@@ -127,7 +185,7 @@ def validate_book_id(book):
 def validate_seat_config(cfg, label):
     """Catch config mistakes that would otherwise surface as unregisterable charts."""
     if not cfg:
-        raise SeedError("SEAT_CONFIG for %r is empty" % label)
+        raise SeedError("the seat table for book %r is empty" % label)
 
     instances = {}
     normalized_accounts = {}
@@ -171,6 +229,71 @@ def validate_seat_config(cfg, label):
             % (label, sorted(instances), len(cfg), sorted(expected)))
 
 
+def validate_books(books):
+    """Validate every seat table, and that no account sits in two books.
+
+    Checked for all books on every run: a second book that reuses an account is a
+    config error even while working on a different book.
+    """
+    owners = {}
+    book_keys = {}
+    for book, spec in sorted(books.items()):
+        validate_book_id(book)
+        if book.lower() in book_keys:
+            raise SeedError("Book IDs %r and %r differ only by case; NinjaTrader treats "
+                            "them as one book" % (book_keys[book.lower()], book))
+        book_keys[book.lower()] = book
+
+        if spec.get("router") not in ROUTER_FOLDERS:
+            raise SeedError("book %s has router %r; expected one of %s"
+                            % (book, spec.get("router"), ", ".join(sorted(ROUTER_FOLDERS))))
+        if spec.get("source") not in SOURCES:
+            raise SeedError("book %s has source %r; expected one of %s"
+                            % (book, spec.get("source"), ", ".join(SOURCES)))
+        seats = spec.get("seats")
+        if not isinstance(seats, dict):
+            raise SeedError("book %s has no 'seats' table" % book)
+        if seats:
+            validate_seat_config(seats, book)
+
+        for account in seats:
+            key = normalize_account(account)
+            if key in owners:
+                other_book, other_account = owners[key]
+                raise SeedError(
+                    "account %s is in book %s (%s router) and book %s (%s router). One "
+                    "account is one drawdown container: it can trade in only one book "
+                    "across both routers." % (account, other_book,
+                                              books[other_book]["router"], book,
+                                              spec["router"]))
+            owners[key] = (book, account)
+
+
+def resolve_book(requested, books):
+    """Return the canonical Book ID for a case-insensitive --book value."""
+    for book in books:
+        if book.lower() == (requested or "").lower():
+            return book
+    raise SeedError("book %r is not in the BOOKS table. Known books: %s"
+                    % (requested, ", ".join(sorted(books))))
+
+
+def split_statement_rows(rows, seat_config, books, book):
+    """Pick this book's rows; return (mine, [(account, other book or None)])."""
+    owner = {}
+    for other, spec in books.items():
+        for account in spec["seats"]:
+            owner[account] = other
+    mine, skipped = [], []
+    for row in rows:
+        account = row.get("Account", "")
+        if account in seat_config:
+            mine.append(row)
+        else:
+            skipped.append((account, owner.get(account)))
+    return mine, skipped
+
+
 def disagreement(account, pairs, explain):
     """Format a statement-vs-config conflict without asserting which side is wrong."""
     width = max(len(k) for k, _ in pairs)
@@ -179,20 +302,20 @@ def disagreement(account, pairs, explain):
         out.append("    %-*s  %s" % (width, key, value))
     out.append("")
     out.append("  " + explain)
-    out.append("  Either the statement is stale, edited or misread, or SEAT_CONFIG is")
-    out.append("  wrong - and SEAT_CONFIG must also match the chart's Signal Routing")
+    out.append("  Either the statement is stale, edited or misread, or the seat table is")
+    out.append("  wrong - and the seat table must also match the chart's Signal Routing")
     out.append("  properties. Check the statement against the broker portal first.")
     out.append("  No peak file was written or verified.")
     return "\n".join(out)
 
 
-def nt8_state_dir():
-    """Best-effort location of the NinjaTrader 8 PropRouter directory."""
+def nt8_state_dir(router="RTL"):
+    """Best-effort location of a router's NinjaTrader 8 state directory."""
     home = os.path.expanduser("~")
     for parent in (os.path.join(home, "Documents", "NinjaTrader 8"),
                    os.path.join(home, "OneDrive", "Documents", "NinjaTrader 8")):
         if os.path.isdir(parent):
-            return os.path.join(parent, "PropRouter")
+            return os.path.join(parent, ROUTER_FOLDERS[router])
     return None
 
 
@@ -262,7 +385,7 @@ def build_seed(row, seat_config):
     account = row.get("Account", "")
     if account not in seat_config:
         raise SeedError(
-            "the statement contains account %r, which is not in SEAT_CONFIG.\n"
+            "the statement contains account %r, which is not in this book's seat table.\n"
             "  configured seats: %s\n"
             "  Add it with the exact start balance and drawdown set on its chart, "
             "or remove it from the statement." % (account, ", ".join(sorted(seat_config))))
@@ -295,7 +418,7 @@ def build_seed(row, seat_config):
         # the smallest peak consistent with the threshold, and floor is capped at
         # start + frozen offset either way. Note that it does make the intraday
         # peak-minus-threshold check tautological for this row - the row's own
-        # drawdown is no longer independently proved, so the start/dd in SEAT_CONFIG
+        # drawdown is no longer independently proved, so the start/dd in the seat table
         # must be confirmed against the broker by eye for a newly added seat.
         if threshold is None:
             raise SeedError("account %s has an empty Auto Liquidate Peak Balance cell "
@@ -306,9 +429,9 @@ def build_seed(row, seat_config):
         if peak < start - TOL:
             raise SeedError(disagreement(account, [
                 ("Auto Liquidate Threshold Value", threshold),
-                ("SEAT_CONFIG drawdown", dd),
+                ("seat table drawdown", dd),
                 ("derived peak (threshold + drawdown)", peak),
-                ("SEAT_CONFIG start balance", start),
+                ("seat table start balance", start),
             ], "No high-water mark was reported, so the peak was derived from the "
                "threshold - but a peak below the starting balance is impossible. "
                "The configured start balance or drawdown is wrong."))
@@ -330,20 +453,20 @@ def build_seed(row, seat_config):
                 raise SeedError(disagreement(account, [
                     ("Auto Liquidate Threshold Value", threshold),
                     ("start balance + frozen offset", frozen_level),
-                    ("SEAT_CONFIG start balance", start),
+                    ("seat table start balance", start),
                     ("frozen floor offset", FROZEN_OFFSET),
                 ], "This seat's floor has frozen, so the threshold must equal "
                    "start + frozen offset exactly."))
         else:
             # The statement proves its own drawdown. This is the check that
-            # catches a wrong SEAT_CONFIG drawdown before it reaches the router.
+            # catches a wrong seat-table drawdown before it reaches the router.
             implied_dd = peak - threshold
             if abs(implied_dd - dd) > TOL:
                 raise SeedError(disagreement(account, [
                     ("Auto Liquidate Peak Balance", peak),
                     ("Auto Liquidate Threshold Value", threshold),
                     ("implied drawdown (peak - threshold)", implied_dd),
-                    ("SEAT_CONFIG drawdown", dd),
+                    ("seat table drawdown", dd),
                 ], "For an intraday seat that has not frozen, peak minus threshold "
                    "IS the drawdown, so these must match exactly."))
 
@@ -365,7 +488,7 @@ def build_seed(row, seat_config):
                 ("Auto Liquidate Peak Balance", peak),
                 ("Auto Liquidate EOD Value", eod_value),
                 ("implied maximum drawdown", implied_min_dd),
-                ("SEAT_CONFIG drawdown", dd),
+                ("seat table drawdown", dd),
             ], "The intraday peak is at or above the end-of-day peak, so peak minus "
                "the EOD floor cannot be smaller than the drawdown."))
 
@@ -641,10 +764,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Build or verify a PropRouter peak file from a broker statement.")
     ap.add_argument("statement", nargs="?", default=None,
-                    help="broker statement CSV (required for --seats live)")
-    ap.add_argument("--seats", choices=sorted(SEAT_CONFIGS), default="live",
-                    help="which SEAT_CONFIG table to use (default: live)")
-    ap.add_argument("--book", default="LIVE", help="Book ID (default: LIVE)")
+                    help="broker statement CSV (required for books whose source is 'statement')")
+    ap.add_argument("--book", default=None,
+                    help="Book ID; selects its seat table and router folder (default: LIVE)")
+    ap.add_argument("--seats", choices=sorted(LEGACY_SEATS), default=None,
+                    help="retired: the Book ID now selects the seat table. 'live' means "
+                         "--book LIVE and 'sim' means --book SIM when --book is omitted")
+    ap.add_argument("--list-books", action="store_true", dest="list_books",
+                    help="list every book with its router, source and seats, then exit")
     ap.add_argument("--out", default=None,
                     help="output path (default: peaks_<BOOK>.csv)")
     ap.add_argument("--report", metavar="ROUTINGCSV", default=None,
@@ -681,25 +808,50 @@ def main(argv=None):
         print("Wrote %s" % os.path.abspath(out))
         return 0
 
-    seat_config = SEAT_CONFIGS[args.seats]
-
+    skipped = []
     try:
-        validate_book_id(args.book)
-        validate_seat_config(seat_config, args.seats)
+        validate_books(BOOKS)
+
+        if args.list_books:
+            for name in sorted(BOOKS):
+                spec = BOOKS[name]
+                seats = sorted(spec["seats"].items(), key=lambda kv: kv[1]["instance"])
+                print("%-8s router=%-3s  folder=%-12s  source=%-9s  seats=%d"
+                      % (name, spec["router"], ROUTER_FOLDERS[spec["router"]],
+                         spec["source"], len(seats)))
+                for account, cfg in seats:
+                    print("    %d  %-20s start=%s dd=%s %s"
+                          % (cfg["instance"], account, cfg["start"], cfg["dd"], cfg["kind"]))
+            return 0
+
+        if args.seats:
+            print("Note: --seats is retired; the Book ID selects the seat table.")
+        if args.book is None:
+            args.book = LEGACY_SEATS[args.seats] if args.seats else "LIVE"
+        args.book = resolve_book(args.book, BOOKS)
+        spec = BOOKS[args.book]
+        seat_config = spec["seats"]
+        if args.seats and spec["source"] != ("statement" if args.seats == "live" else "untraded"):
+            raise SeedError("--seats %s contradicts book %s, whose source is %r. Drop --seats; "
+                            "the Book ID already selects the table." % (args.seats, args.book,
+                                                                         spec["source"]))
+        if not seat_config:
+            raise SeedError("book %s has no seats yet. Add its accounts to BOOKS[%r]['seats'] "
+                            "in make_peak_file.py first." % (args.book, args.book))
 
         if args.check and args.allow_peak_reset:
             raise SeedError("--allow-peak-reset is a write-only override and cannot be used with --check")
 
-        if args.statement and args.seats == "sim":
+        if args.statement and spec["source"] == "untraded":
             raise SeedError(chr(10).join([
-                "--seats sim does not take a broker statement.",
+                "book %s does not take a broker statement." % args.book,
                 "",
-                "  Simulation accounts have no broker statement. Peaks come from",
-                "  SEAT_CONFIG_SIM with peak = start, which is correct while those",
-                "  accounts are untraded.",
+                "  Its accounts are untraded simulation accounts with no statement.",
+                "  Peaks come from the seat table with peak = start, which is correct",
+                "  while those accounts are untraded.",
                 "",
                 "  Run instead:",
-                "      python make_peak_file.py --seats sim --book %s --install" % args.book,
+                "      python make_peak_file.py --book %s --install" % args.book,
                 "",
                 "  If they have already traded, reset them in NinjaTrader and re-run.",
                 "  Do not hand-write a statement to approximate their peaks: every",
@@ -709,22 +861,35 @@ def main(argv=None):
 
         if args.statement:
             rows = read_statement(args.statement)
-            seeds = [build_seed(r, seat_config) for r in rows]
+            mine, skipped = split_statement_rows(rows, seat_config, BOOKS, args.book)
+            seeds = [build_seed(r, seat_config) for r in mine]
             missing = set(seat_config) - set(s["account"] for s in seeds)
             if missing:
-                raise SeedError("statement is missing configured seats: %s"
-                                % ", ".join(sorted(missing)))
+                raise SeedError("statement is missing configured seats of book %s: %s"
+                                % (args.book, ", ".join(sorted(missing))))
             source = args.statement
-        elif args.seats == "live":
-            raise SeedError("a broker statement is required for --seats live")
+        elif spec["source"] == "statement":
+            raise SeedError("book %s reads its peaks from a broker statement; pass the "
+                            "statement file" % args.book)
         else:
             seeds = build_untraded_seeds(seat_config)
-            source = "SEAT_CONFIG_SIM (no statement; accounts assumed untraded)"
+            source = "the %s seat table (no statement; accounts assumed untraded)" % args.book
     except SeedError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 2
 
+    router = spec["router"]
+    folder = ROUTER_FOLDERS[router]
+    print("Book %s  (%s router, %s folder)" % (args.book, router, folder))
     print("Prepared %d seats from %s" % (len(seeds), source))
+    if skipped:
+        others = sorted(a for a, b in skipped if b)
+        unbooked = sorted(a for a, b in skipped if not b)
+        if others:
+            print("  skipped (other books): %s" % ", ".join(
+                "%s [%s]" % (a, b) for a, b in sorted(skipped) if b))
+        if unbooked:
+            print("  skipped (in no book):  %s" % ", ".join(unbooked))
     if not args.statement:
         print("")
         print("  Seeded at the starting balance, which is correct ONLY while these")
@@ -735,7 +900,7 @@ def main(argv=None):
     if args.check:
         print("")
         print("Checking %s against %s:"
-              % (args.check, "the statement" if args.statement else "SEAT_CONFIG"))
+              % (args.check, "the statement" if args.statement else "the seat table"))
         try:
             ok = check_existing(seeds, args.check)
         except SeedError as exc:
@@ -751,10 +916,10 @@ def main(argv=None):
         return 2
 
     if args.install:
-        state_dir = args.nt8_dir or nt8_state_dir()
+        state_dir = args.nt8_dir or nt8_state_dir(router)
         if not state_dir:
             print("ERROR: could not locate the NinjaTrader 8 directory. Pass "
-                  "--nt8-dir with the PropRouter folder path.", file=sys.stderr)
+                  "--nt8-dir with the %s folder path." % folder, file=sys.stderr)
             return 2
         try:
             if not os.path.isdir(state_dir):
@@ -789,8 +954,10 @@ def main(argv=None):
     for s in sorted(seeds, key=lambda x: x["instance"]):
         print("  Instance %d  %s   Seat starting balance=%.0f  Seat trailing drawdown=%.0f"
               % (s["instance"], s["account"], s["start"], s["dd"]))
-    print("  All six charts: Frozen floor offset=%.0f (book manifest - must be identical)"
-          % FROZEN_OFFSET)
+    print("  All %d charts: Frozen floor offset=%.0f (book manifest - must be identical)"
+          % (len(seeds), FROZEN_OFFSET))
+    print("  Strategy: %s" % ("the routed GG strategy (PropRouterGG)" if router == "GG"
+                              else "the routed RTL strategy (PropRouter)"))
     print("")
     print("Next:")
     if args.install:
@@ -806,7 +973,7 @@ def main(argv=None):
               % args.book)
         print("     router rewrites the file on every new equity high and would clobber it.")
         print("  2. Copy to:  %s" % os.path.join(
-            nt8_state_dir() or "<Documents>/NinjaTrader 8/PropRouter",
+            nt8_state_dir(router) or "<Documents>/NinjaTrader 8/%s" % folder,
             os.path.basename(out)))
         print("  3. Fully restart NinjaTrader, then start the strategies; each should")
         print("     print 'peak seeded at ...'.")

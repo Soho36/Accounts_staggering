@@ -85,13 +85,24 @@ reconcile. Run it from the `nt8` folder.
 |---|---|
 | Live book, write locally | `python make_peak_file.py Broker_statement.csv --book LIVE` |
 | Live book, write into NinjaTrader | `python make_peak_file.py Broker_statement.csv --book LIVE --install` |
-| Simulation book | `python make_peak_file.py --seats sim --book SIM --install` |
-| Verify a live file matches a fresh statement | `python make_peak_file.py Broker_statement.csv --check peaks_LIVE.csv` |
-| Verify a simulation file | `python make_peak_file.py --seats sim --check peaks_SIM.csv` |
+| GG live book, write into NinjaTrader | `python make_peak_file.py Broker_statement.csv --book GG --install` |
+| Simulation book | `python make_peak_file.py --book SIM --install` |
+| Verify a live file matches a fresh statement | `python make_peak_file.py Broker_statement.csv --book LIVE --check peaks_LIVE.csv` |
+| Verify a simulation file | `python make_peak_file.py --book SIM --check peaks_SIM.csv` |
+| Show every book, its router and seats | `python make_peak_file.py --list-books` |
 | Non-standard NinjaTrader folder | add `--nt8-dir "D:\path\to\PropRouter"` |
 
-`--install` writes straight into `Documents\NinjaTrader 8\PropRouter\` and names
-the file from `--book`, so the Book ID is typed once instead of twice. Without it
+Each Book ID has its own seat table in `BOOKS` at the top of the script. The
+table names the book's router - RTL books live in `Documents\NinjaTrader 8\PropRouter\`,
+GG books in `Documents\NinjaTrader 8\PropRouterGG\` - and whether it needs a
+broker statement. `--install` writes straight into that folder and names the
+file from `--book`, so the Book ID is typed once instead of twice. `--seats` is
+retired: `--seats sim` still works and means `--book SIM`.
+
+One statement serves every book. Rows of other books' accounts, and accounts in
+no book, are skipped and listed; every seat of the selected book must be present.
+An account may appear in only one book across both routers, and every run checks
+that for all tables. Without it
 the file lands in the current directory and the script prints the exact
 destination to copy it to. `--install` and `--out` cannot be combined.
 
@@ -112,7 +123,7 @@ The seed is the broker's own governing high-water mark,
 
 - **Intraday seat, not yet frozen.** `peak - threshold` *is* the drawdown, so it
   must equal the configured value exactly. This is what catches a wrong
-  `SEAT_CONFIG` drawdown before it can reach the router.
+  seat-table drawdown before it can reach the router.
 - **Intraday seat, frozen.** That identity no longer holds because the floor is
   pinned, so the script verifies `threshold == start + frozen offset` instead.
 - **End-of-day seat** (`Auto Liquidate EOD Value` populated, threshold blank).
@@ -120,14 +131,14 @@ The seed is the broker's own governing high-water mark,
   above the broker's real EOD floor, reporting the gap. A modelled floor *below*
   it would overstate headroom and is refused.
 
-Any disagreement prints both sides and blames neither - a wrong `SEAT_CONFIG`
+Any disagreement prints both sides and blames neither - a wrong seat table
 and a stale or edited statement produce the same symptom.
 
 ### Simulation book, with no statement
 
 Simulation accounts have no broker statement. An account that has never traded
 has no high-water mark above its starting balance, so the script seeds
-`peak = start` directly from `SEAT_CONFIG_SIM`, giving each seat its full
+`peak = start` directly from the book's seat table, giving each seat its full
 drawdown as headroom. No statement argument is needed or accepted.
 
 This is correct **only before those accounts trade**. Once they have, the real
@@ -135,7 +146,7 @@ peak may be higher, and seeding at the starting balance would put the floor too
 low and overstate headroom. Reset the simulation accounts in NinjaTrader and
 re-run rather than guessing a value.
 
-`SEAT_CONFIG_SIM` mirrors the live drawdown mix (1500/1500/2000/2000/2000/2500)
+The `SIM` seat table mirrors the live drawdown mix (1500/1500/2000/2000/2000/2500)
 so Playback exercises the same ranking dynamics as the real book. Its `start`
 values must equal the simulation accounts' actual starting balances in
 NinjaTrader, because the router measures headroom against real account equity.
@@ -145,8 +156,8 @@ wherever the account starts.
 
 ### What must match the charts
 
-`start_balance` and `drawdown` come from the `SEAT_CONFIG` / `SEAT_CONFIG_SIM`
-table at the top of the script. **They must equal each chart's Seat starting
+`start_balance` and `drawdown` come from the book's seat table in `BOOKS` at
+the top of the script. **They must equal each chart's Seat starting
 balance and Seat trailing drawdown exactly** - the router compares them with an
 exact equality test and refuses to register the seat on any mismatch. Edit the
 table, never the generated CSV. Every run prints the per-chart values to enter.

@@ -89,9 +89,6 @@ class PeakFileSafetyTests(unittest.TestCase):
             mpf.validate_seat_config(config, "test")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 HEADER = ["Account", "Status", "Account Balance",
           "Auto Liquidate Threshold Value", "Auto Liquidate Peak Balance",
@@ -160,3 +157,134 @@ class UntradedSeatSeedingTests(unittest.TestCase):
         # Would mean the configured start/dd disagree with the broker.
         with self.assertRaises(mpf.SeedError):
             self._seed(threshold="20000", peak="")
+
+
+def books(**tables):
+    """Build a BOOKS-shaped dict: books(LIVE=("RTL", "statement", seats), ...)."""
+    return dict((name, {"router": router, "source": source, "seats": seats})
+                for name, (router, source, seats) in tables.items())
+
+
+def seat(instance, start="25000", dd="1500"):
+    return {"instance": instance, "start": start, "dd": dd, "kind": "intraday"}
+
+
+class BookTableTests(unittest.TestCase):
+    """One seat table per Book ID, shared rules across the RTL and GG routers."""
+
+    def test_shipped_books_table_is_valid(self):
+        mpf.validate_books(mpf.BOOKS)
+        self.assertEqual(mpf.BOOKS["LIVE"]["router"], "RTL")
+        self.assertEqual(mpf.BOOKS["GG"]["router"], "GG")
+
+    def test_account_in_two_books_is_refused_across_routers(self):
+        table = books(LIVE=("RTL", "statement", {"ACC-1": seat(1)}),
+                      GG=("GG", "statement", {"acc-1!Apex": seat(1)}))
+        with self.assertRaises(mpf.SeedError) as ctx:
+            mpf.validate_books(table)
+        self.assertIn("one drawdown container", str(ctx.exception))
+
+    def test_book_ids_differing_only_by_case_are_refused(self):
+        table = books(GG=("GG", "statement", {"ACC-1": seat(1)}),
+                      gg=("GG", "statement", {"ACC-2": seat(1)}))
+        with self.assertRaises(mpf.SeedError):
+            mpf.validate_books(table)
+
+    def test_unknown_router_or_source_is_refused(self):
+        for table in (books(X=("NOPE", "statement", {})),
+                      books(X=("GG", "guess", {}))):
+            with self.assertRaises(mpf.SeedError):
+                mpf.validate_books(table)
+
+    def test_instance_ids_are_per_book(self):
+        table = books(LIVE=("RTL", "statement", {"ACC-1": seat(1), "ACC-2": seat(2)}),
+                      GG=("GG", "statement", {"ACC-3": seat(1), "ACC-4": seat(2)}))
+        mpf.validate_books(table)
+
+    def test_book_lookup_is_case_insensitive_and_canonical(self):
+        self.assertEqual(mpf.resolve_book("gg", mpf.BOOKS), "GG")
+        with self.assertRaises(mpf.SeedError):
+            mpf.resolve_book("NO_SUCH_BOOK", mpf.BOOKS)
+
+    def test_router_folders(self):
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "Documents" / "NinjaTrader 8").mkdir(parents=True)
+            original = mpf.os.path.expanduser
+            mpf.os.path.expanduser = lambda path: home if path == "~" else original(path)
+            try:
+                self.assertTrue(mpf.nt8_state_dir("RTL").endswith("PropRouter"))
+                self.assertTrue(mpf.nt8_state_dir("GG").endswith("PropRouterGG"))
+            finally:
+                mpf.os.path.expanduser = original
+
+
+class StatementRoutingTests(unittest.TestCase):
+    """One broker export covers every book; each build takes only its own rows."""
+
+    TABLE = books(LIVE=("RTL", "statement", {"ACC-1": seat(1)}),
+                  GG=("GG", "statement", {"ACC-2": seat(1)}),
+                  GG_SIM=("GG", "untraded", {}))
+
+    ROWS = [["ACC-1", "Active", "25000", "23500", "", ""],
+            ["ACC-2", "Active", "25000", "23500", "", ""],
+            ["ACC-9", "Active", "25000", "23500", "", ""]]
+
+    def run_main(self, *argv):
+        original = mpf.BOOKS
+        mpf.BOOKS = self.TABLE
+        try:
+            return mpf.main(list(argv))
+        finally:
+            mpf.BOOKS = original
+
+    def test_rows_split_by_book(self):
+        rows = [dict(zip(HEADER, r)) for r in self.ROWS]
+        mine, skipped = mpf.split_statement_rows(rows, self.TABLE["GG"]["seats"],
+                                                 self.TABLE, "GG")
+        self.assertEqual([r["Account"] for r in mine], ["ACC-2"])
+        self.assertEqual(sorted(skipped), [("ACC-1", "LIVE"), ("ACC-9", None)])
+
+    def test_each_book_builds_from_the_shared_statement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            statement = Path(tmp) / "statement.csv"
+            write_statement(statement, self.ROWS, "\t")
+            for book, account in (("LIVE", "ACC-1"), ("gg", "ACC-2")):
+                out = Path(tmp) / ("peaks_%s.csv" % book)
+                self.assertEqual(self.run_main(str(statement), "--book", book, "--out", str(out)), 0)
+                body = out.read_text(encoding="utf-8")
+                self.assertIn(account + ",", body)
+                self.assertEqual(body.count("\n"), 2)   # header + exactly this book's seat
+
+    def test_missing_seat_of_the_selected_book_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            statement = Path(tmp) / "statement.csv"
+            write_statement(statement, [self.ROWS[0]], ",")
+            out = Path(tmp) / "peaks_GG.csv"
+            self.assertEqual(self.run_main(str(statement), "--book", "GG", "--out", str(out)), 2)
+            self.assertFalse(out.exists())
+
+    def test_empty_book_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "peaks_GG_SIM.csv"
+            self.assertEqual(self.run_main("--book", "GG_SIM", "--out", str(out)), 2)
+            self.assertFalse(out.exists())
+
+
+class LegacySeatsFlagTests(unittest.TestCase):
+    """--seats is retired but existing commands keep working."""
+
+    def test_seats_sim_without_book_builds_the_sim_book(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "peaks_SIM.csv"
+            self.assertEqual(mpf.main(["--seats", "sim", "--out", str(out)]), 0)
+            self.assertIn("SIM101,", out.read_text(encoding="utf-8"))
+
+    def test_seats_contradicting_the_book_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "x.csv"
+            self.assertEqual(mpf.main(["--seats", "sim", "--book", "LIVE", "--out", str(out)]), 2)
+            self.assertFalse(out.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
