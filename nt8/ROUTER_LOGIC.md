@@ -240,6 +240,11 @@ separate registries with separate state folders (`PropRouter\` and
 Everything on this page applies to each router on its own: a GG decision never
 looks at an RTL seat, and the reverse.
 
+Both books number their seats from 1, so GG order names and log tags carry a
+`GG_` prefix: `[GG_Long1_1]` is GG seat 1, `[Long1_1]` is RTL seat 1. The same
+goes for `GG_StopLimit_`, `GG_RR_Limit_`, `GG_StopTimeoutExit_` and
+`GG_InvalidStopExit_`.
+
 An account can sit in only one book across both. If a GG seat's account is listed
 in any RTL peak file, GG refuses to register it:
 

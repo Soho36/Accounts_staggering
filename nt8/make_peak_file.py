@@ -89,12 +89,9 @@ BOOKS = {
         "router": "RTL",
         "source": "statement",
         "seats": {
-            "PA-APEX-240737-17": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
-            "PA-APEX-240737-18": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
-            "PA-APEX-240737-16": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
-            "PA-APEX-240737-13": {"instance": 4, "start": "50000", "dd": "2000", "kind": "eod"},
-            "PA-APEX-240737-14": {"instance": 5, "start": "50000", "dd": "2000", "kind": "intraday"},
-            "PA-APEX-240737-15": {"instance": 6, "start": "50000", "dd": "2500", "kind": "intraday"},
+            "PA-APEX-240737-13": {"instance": 1, "start": "50000", "dd": "2000", "kind": "eod"},
+            "PA-APEX-240737-14": {"instance": 2, "start": "50000", "dd": "2000", "kind": "intraday"},
+            "PA-APEX-240737-15": {"instance": 3, "start": "50000", "dd": "2500", "kind": "intraday"},
         },
     },
 
@@ -128,6 +125,10 @@ BOOKS = {
         "router": "GG",
         "source": "statement",
         "seats": {
+            "PA-APEX-240737-16": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-17": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-18": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-21": {"instance": 4, "start": "25000", "dd": "1500", "kind": "intraday"},
         },
     },
 

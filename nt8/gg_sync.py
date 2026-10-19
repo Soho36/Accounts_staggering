@@ -30,6 +30,8 @@ Strategy (GG_..._Routed_MaxGreenRun.cs)
     source has three comparisons and two of them would slip past those literals.
     Generation refuses to run if any Open[...] use is not a recognised comparison.
   * Bound to PropRouterGG instead of PropRouter.
+  * Order names and log tags carry a GG_ prefix (GG_Long1_1, GG_StopLimit_1, ...),
+    so an RTL seat and a GG seat with the same Instance ID never look alike.
 
 The transform is self-tested against the standalone RR/GG pair whenever the
 RT30_min_nt8_standalone project sits next to this one.
@@ -84,6 +86,17 @@ CANDLE_CMP_RE = re.compile(
     r"\b(Close|Open)(\s*\[[^\]\n]*\]\s*)(<=|>=|==|!=|<|>)(\s*)(Close|Open)(\s*\[[^\]\n]*\])")
 MIRROR = {"<": ">", ">": "<", "<=": ">=", ">=": "<=", "==": "==", "!=": "!="}
 OPEN_USE_RE = re.compile(r"\bOpen\s*\[")
+
+# Order-name properties of the routed strategy, each `$"<prefix>{InstanceId}"`.
+ORDER_NAME_PROPERTIES = ("Long1_", "StopLimit_", "RR_Limit_", "InvalidStopExit_",
+                         "StopTimeoutExit_")
+OWNERSHIP_ANCHOR = '            return name.StartsWith("Long1_", StringComparison.Ordinal)\n'
+OWNERSHIP_STRIP = (
+    '            // GG ONLY (gg_sync.py): GG order names carry a GG_ prefix. Strip it so\n'
+    '            // both prefixed names and pre-prefix leftovers count as ours.\n'
+    '            if (name.StartsWith("GG_", StringComparison.Ordinal))\n'
+    '                name = name.Substring(3);\n'
+)
 
 RED_CIRCLE = u"\U0001F534"
 GREEN_CIRCLE = u"\U0001F7E2"
@@ -258,8 +271,25 @@ def build_router(text):
     return text
 
 
+def prefix_order_names(text):
+    """Give every GG order and log tag a GG_ prefix (GG_Long1_1, GG_StopLimit_1, ...).
+
+    Both routers number seats 1..N, so without it an RTL seat and a GG seat share
+    names like Long1_1 in the one NinjaScript Output window and order log. The
+    ownership check strips the prefix first instead of being renamed, so GG still
+    treats an order left over under its old, unprefixed name as its own and the
+    startup/runtime orphan checks keep blocking on it.
+    """
+    for prop in ORDER_NAME_PROPERTIES:
+        text = replace_exact(text, '$"%s{InstanceId}"' % prop,
+                             '$"GG_%s{InstanceId}"' % prop, 1, GG_STRATEGY)
+    return replace_exact(text, OWNERSHIP_ANCHOR, OWNERSHIP_STRIP + OWNERSHIP_ANCHOR, 1,
+                         GG_STRATEGY)
+
+
 def build_strategy(text):
     text, swapped = rr_to_gg(text, ROUTED_IDENTITY, GG_STRATEGY)
+    text = prefix_order_names(text)
     if "using NinjaTrader.NinjaScript.AddOns;" not in text:
         raise SyncError("%s: no 'using NinjaTrader.NinjaScript.AddOns;' - router binding "
                         "changed shape" % RTL_STRATEGY)

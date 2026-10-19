@@ -31,7 +31,8 @@ especially before creating or editing a peak file.
 ### GG: second strategy, second router
 
 GG is the green-candle strategy (`Close > Open`), otherwise identical in entry,
-stop, target, windows and timeouts. It runs on its own router, `PropRouterGG`,
+stop, target, windows and timeouts. Its order names and log tags carry a `GG_`
+prefix (`GG_Long1_1`, `GG_StopLimit_1`, ...). It runs on its own router, `PropRouterGG`,
 with its own state folder `Documents\NinjaTrader 8\PropRouterGG\`, so nothing a
 GG book does can touch RTL state. One account may belong to only one book across
 both routers: `PropRouterGG` refuses any account listed in an RTL peak file.

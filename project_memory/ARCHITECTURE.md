@@ -131,7 +131,8 @@ never edited by hand; `python gg_sync.py` exits 1 on any drift. Why: DECISIONS
 2026-10-15.
 
 - Strategy = routed RTL with the RR→GG transform (identity, wording,
-  `MaxGreenRun`, every Close/Open comparison mirrored). Entry, stop and target
+  `MaxGreenRun`, every Close/Open comparison mirrored, `GG_` order-name prefix;
+  its ownership check also accepts unprefixed names). Entry, stop and target
   rules are otherwise identical: buy above the signal candle's high, stop at its
   low.
 - Router = `PropRouter.cs` with GG-suffixed type names, its own state folder

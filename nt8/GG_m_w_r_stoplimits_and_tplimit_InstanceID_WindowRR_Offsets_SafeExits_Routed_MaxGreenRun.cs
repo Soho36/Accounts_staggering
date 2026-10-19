@@ -64,7 +64,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Order stopFallbackOrder;
         private Order stopFallbackEntryOrder;
         private readonly Dictionary<Order, int> stopFallbackExecutions = new Dictionary<Order, int>();
-        private string StopFallbackName => $"StopTimeoutExit_{InstanceId}";
+        private string StopFallbackName => $"GG_StopTimeoutExit_{InstanceId}";
         // Bar whose signal produced the currently working entry order. Red/doji
         // bars preserve this setup; a rejected later green signal can invalidate it.
         private DateTime entryOrderBarTime = Core.Globals.MinDate;
@@ -123,10 +123,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool strategyPositionFlat = true;
 
         // Derived signal names — all unique per instance to prevent cross-instance interference
-        private string EntrySignalName    => $"Long1_{InstanceId}";
-        private string StopLossSignalName => $"StopLimit_{InstanceId}";
-        private string TakeProfitName     => $"RR_Limit_{InstanceId}";
-        private string EmergencyExitName  => $"InvalidStopExit_{InstanceId}";
+        private string EntrySignalName    => $"GG_Long1_{InstanceId}";
+        private string StopLossSignalName => $"GG_StopLimit_{InstanceId}";
+        private string TakeProfitName     => $"GG_RR_Limit_{InstanceId}";
+        private string EmergencyExitName  => $"GG_InvalidStopExit_{InstanceId}";
         private int EntryQuantity         => UseCustomQuantity ? CustomQuantity : DefaultQuantity;
 
 		// ===== INSTANCE ID =====
@@ -1027,6 +1027,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             // from any instance of this strategy family must be resolved first.
             if (string.IsNullOrEmpty(name))
                 return false;
+            // GG ONLY (gg_sync.py): GG order names carry a GG_ prefix. Strip it so
+            // both prefixed names and pre-prefix leftovers count as ours.
+            if (name.StartsWith("GG_", StringComparison.Ordinal))
+                name = name.Substring(3);
             return name.StartsWith("Long1_", StringComparison.Ordinal)
                 || name.StartsWith("StopLimit_", StringComparison.Ordinal)
                 || name.StartsWith("RR_Limit_", StringComparison.Ordinal)
