@@ -393,7 +393,8 @@ def main(argv=None):
         if os.path.exists(path):
             with io.open(path, "rb") as fh:
                 current = fh.read()
-        if current == data:
+        # Git's autocrlf rewrites line endings on checkout; that is not drift.
+        if current is not None and current.replace(b"\r\n", b"\n") == data.replace(b"\r\n", b"\n"):
             print("  up to date  %s" % rel)
         elif args.write:
             atomic_write(path, data)

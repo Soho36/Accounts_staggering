@@ -144,6 +144,20 @@ submitted `External` exits and disabled strategies during lifecycle callbacks.
 **Consequence:** End-of-day exit timing changes deliberately. Validate the new
 ordering in live logs; do not move Auto Close earlier than the strategy owner.
 
+### 2026-10-21 — A doji is never a signal
+
+**Decision:** The routed strategies fire only on a strictly red (RTL) or strictly
+green (GG) candle; a doji (close == open) is a non-signal bar. There is no switch.
+**Reason:** Both MT5 EAs behind the study use strict tests (`c1 < o1`,
+`c1 > o1`), so every measured figure excludes dojis. Measured separately
+(`results/doji_study.md`): 678 dojis in 77,137 M30 bars (0.88%); traded alone,
+355 trades netted +$24 after commission over 2020 – 2026-07, $0.07 a trade, with
+yearly results alternating sign. An opt-in switch was built and removed on
+2026-10-21 as complexity without an edge; a doji in both books would also have
+opened RTL and GG at once.
+**Reconsider if:** a combined-signal backtest (doji inside RR/GG, including its
+re-pricing and run-cap effects) shows an edge.
+
 ### 2026-08-24 — No in-session disarming
 
 **Decision:** Removed all runtime `startupBlocked` sites. The only things that may
