@@ -126,9 +126,8 @@ BOOKS = {
         "source": "statement",
         "seats": {
             "PA-APEX-240737-16": {"instance": 1, "start": "25000", "dd": "1500", "kind": "intraday"},
-            "PA-APEX-240737-17": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
-            "PA-APEX-240737-18": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
-            "PA-APEX-240737-21": {"instance": 4, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-21": {"instance": 2, "start": "25000", "dd": "1500", "kind": "intraday"},
+            "PA-APEX-240737-22": {"instance": 3, "start": "25000", "dd": "1500", "kind": "intraday"},
         },
     },
 
@@ -159,12 +158,18 @@ BOOK_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 REQUIRED_COLUMNS = (
     "Account",
-    "Status",
     "Account Balance",
     "Auto Liquidate Threshold Value",
     "Auto Liquidate EOD Value",
     "Auto Liquidate Peak Balance",
 )
+# "Status" is checked whenever the export carries it. The shorter export some
+# portal views produce omits it; every seat is then still refused if its balance
+# is at or below its liquidation threshold (see build_seed).
+OPTIONAL_COLUMNS = ("Status",)
+
+# Header spellings seen in Apex exports -> the name used here.
+COLUMN_ALIASES = {"Auto Liquidate EOD": "Auto Liquidate EOD Value"}
 
 
 class SeedError(Exception):
@@ -348,9 +353,11 @@ def read_statement(path):
         text = fh.read()
 
     fields, rows, delimiter = [], [], None
-    for candidate in (",", "	"):
+    for candidate in (",", "\t"):
         reader = csv.DictReader(io.StringIO(text), delimiter=candidate)
-        got = [(f or "").strip() for f in (reader.fieldnames or [])]
+        reader.fieldnames = [COLUMN_ALIASES.get((f or "").strip(), (f or "").strip())
+                             for f in (reader.fieldnames or [])]
+        got = list(reader.fieldnames)
         if not [c for c in REQUIRED_COLUMNS if c not in got]:
             fields, rows, delimiter = got, list(reader), candidate
             break
@@ -391,8 +398,8 @@ def build_seed(row, seat_config):
             "  Add it with the exact start balance and drawdown set on its chart, "
             "or remove it from the statement." % (account, ", ".join(sorted(seat_config))))
 
-    status = row.get("Status", "")
-    if status.lower() != "active":
+    status = row.get("Status")
+    if status is not None and status.lower() != "active":
         raise SeedError("account %s has status %r, not Active" % (account, status))
 
     cfg = seat_config[account]
@@ -407,6 +414,16 @@ def build_seed(row, seat_config):
 
     if balance is None:
         raise SeedError("account %s has no Account Balance" % account)
+
+    # A balance at or below the broker's own liquidation level means the account
+    # is liquidated (Apex leaves the row in the export). Seeding it would put a
+    # dead account into a book. Observed 2026-10-26: accounts 17 and 18.
+    liquidation = threshold if threshold is not None else eod_value
+    if liquidation is not None and balance <= liquidation:
+        raise SeedError(
+            "account %s balance %s is at or below its liquidation threshold %s: the "
+            "account is liquidated. Remove it from the seat table."
+            % (account, balance, liquidation))
     derived_note = ""
     if peak is None:
         # A brand-new account has no high-water mark cell yet, and re-exporting will

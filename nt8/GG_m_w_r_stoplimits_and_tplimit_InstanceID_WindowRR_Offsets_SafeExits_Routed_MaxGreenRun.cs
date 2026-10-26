@@ -68,6 +68,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Order stopFallbackOrder;
         private Order stopFallbackEntryOrder;
         private readonly Dictionary<Order, int> stopFallbackExecutions = new Dictionary<Order, int>();
+        // Consecutive fallback exits that ended without a fill. The fallback halts at
+        // the cap instead of retrying forever: on 2026-10-26 a liquidated account
+        // rejected 9,880 exits in three hours ("administrators only").
+        private const int MaxStopFallbackFailures = 3;
+        private int stopFallbackFailures;
+        private Order lastFailedStopFallbackOrder;
+        // Latched until NinjaTrader restarts once this seat's exits are unsafe to send.
+        private bool exitsHalted;
         private string StopFallbackName => $"GG_StopTimeoutExit_{InstanceId}";
         // Bar whose signal produced the currently working entry order. Red/doji
         // bars preserve this setup; a rejected later green signal can invalidate it.
@@ -1541,6 +1549,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 stopFallbackOrder = null;
                 stopFallbackEntryOrder = null;
                 stopFallbackExecutions.Clear();
+                stopFallbackFailures = 0;
+                lastFailedStopFallbackOrder = null;
             }
         }
 
@@ -1591,6 +1601,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (State != State.Realtime)
                 return;
+            lock (exitOrdersSync)
+                if (exitsHalted)
+                    return;
 
             Order[] stops;
             Order[] targets;
@@ -1628,6 +1641,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 CancelForStopFallback(order);
 
             int remaining;
+            string haltReason = null;
             lock (exitOrdersSync)
             {
                 if (!IsStopFallbackOrderSettled(stopFallbackEntryOrder))
@@ -1650,9 +1664,30 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (Position.MarketPosition != MarketPosition.Long || Position.Quantity <= 0
                     || (now - lastStopFallbackAttempt).TotalSeconds < 1)
                     return;
+                // Reaching here with a previous exit means it ended unfilled
+                // (rejected or cancelled); count each such order once.
+                if (stopFallbackOrder != null && !ReferenceEquals(stopFallbackOrder, lastFailedStopFallbackOrder))
+                {
+                    lastFailedStopFallbackOrder = stopFallbackOrder;
+                    stopFallbackFailures++;
+                }
+                string accountDetail;
+                if (AccountClosedOutsideStrategy(out accountDetail))
+                    haltReason = "the position was closed outside this strategy (" + accountDetail
+                        + "); selling now would open a short";
+                else if (stopFallbackFailures >= MaxStopFallbackFailures)
+                    haltReason = stopFallbackFailures + " market exits in a row ended without a fill";
                 remaining = Position.Quantity;
-                stopFallbackSubmitting = true;
-                lastStopFallbackAttempt = now;
+                if (haltReason == null)
+                {
+                    stopFallbackSubmitting = true;
+                    lastStopFallbackAttempt = now;
+                }
+            }
+            if (haltReason != null)
+            {
+                HaltExits("stop-timeout fallback stopped: " + haltReason);
+                return;
             }
 
             try
@@ -1662,12 +1697,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     if (submitted != null && !Order.IsTerminalState(submitted.OrderState))
                         stopFallbackOrder = submitted;
+                    if (submitted == null)
+                        stopFallbackFailures++;
                 }
                 Print($"[{now}] [{EntrySignalName}] Stop timeout market exit quantity={remaining}: "
                     + (submitted == null ? "API returned no order; will retry" : submitted.OrderState.ToString()));
             }
             catch (Exception ex)
             {
+                lock (exitOrdersSync)
+                    stopFallbackFailures++;
                 Print($"[{now}] [{EntrySignalName}] Stop timeout market exit failed: {ex.Message}; will retry");
             }
             finally
@@ -1675,6 +1714,44 @@ namespace NinjaTrader.NinjaScript.Strategies
                 lock (exitOrdersSync)
                     stopFallbackSubmitting = false;
             }
+        }
+
+        // NinjaTrader never credits a broker-side close (an Apex liquidation, a flatten
+        // from another platform) to the strategy, so the strategy can still read Long
+        // after the account is flat. Any sell sent then would OPEN a short position.
+        // An unreadable account position counts as not proven long.
+        private bool AccountClosedOutsideStrategy(out string detail)
+        {
+            MarketPosition side = MarketPosition.Flat;
+            int quantity = 0;
+            try
+            {
+                if (PositionAccount != null)
+                {
+                    side = PositionAccount.MarketPosition;
+                    quantity = PositionAccount.Quantity;
+                }
+            }
+            catch { }
+            detail = $"strategy reads {Position.MarketPosition} {Position.Quantity}, account reads {side} {quantity}";
+            return Position.MarketPosition == MarketPosition.Long
+                && (side != MarketPosition.Long || quantity < Position.Quantity);
+        }
+
+        // Stops every further exit order from this seat until NinjaTrader restarts. The
+        // seat keeps reading InPosition, so the router never routes to it meanwhile.
+        private void HaltExits(string reason)
+        {
+            lock (exitOrdersSync)
+            {
+                if (exitsHalted)
+                    return;
+                exitsHalted = true;
+            }
+            Print($"[{Core.Globals.Now}] [{EntrySignalName}] ⛔ EXITS HALTED: {reason}. No further exit orders "
+                + "will be sent from this seat. Check the account at the broker now, flatten anything still "
+                + "open there, then fully restart NinjaTrader. The seat stays blocked until then.");
+            PublishStatus();
         }
 
         private bool ExceedsMaxGreenRun()
@@ -2158,6 +2235,16 @@ namespace NinjaTrader.NinjaScript.Strategies
             // R:R target uses the value captured from the entry signal's time window
 			if (Position.MarketPosition == MarketPosition.Long)
             {
+                string accountDetail;
+                if (AccountClosedOutsideStrategy(out accountDetail))
+                {
+                    // Not latched: a late account update must not block a healthy seat.
+                    Print($"[{Time[0]}] [{EntrySignalName}] ⛔ No take-profit order: the position was closed "
+                        + $"outside this strategy ({accountDetail}). Check the broker account, then fully "
+                        + "restart NinjaTrader.");
+                    return;
+                }
+
                 double targetPrice = Instrument.MasterInstrument.RoundToTickSize(entryPrice + (riskPerTrade * positionRiskReward));
 
 				if (positionRiskReward > 0 && Close[0] >= targetPrice

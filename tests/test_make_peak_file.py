@@ -286,5 +286,40 @@ class LegacySeatsFlagTests(unittest.TestCase):
             self.assertFalse(out.exists())
 
 
+
+class ShortStatementLayoutTests(unittest.TestCase):
+    """Some Apex views export no Status column and name the EOD column differently."""
+
+    SHORT = ["Account", "Account Balance", "Auto Liquidate Threshold Value",
+             "Auto Liquidate Peak Balance", "Auto Liquidate EOD"]
+
+    def write(self, tmp, header, rows):
+        path = Path(tmp) / "short.csv"
+        lines = [chr(9).join(header)] + [chr(9).join(r) for r in rows]
+        path.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+        return mpf.read_statement(str(path))
+
+    def test_short_layout_seeds_a_live_seat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = self.write(tmp, self.SHORT, [["ACC-1", "24964.18", "24248.69", "25748.69", ""]])
+            seed = mpf.build_seed(rows[0], CFG)
+            self.assertEqual(seed["peak"], Decimal("25748.69"))
+
+    def test_liquidated_seat_is_refused(self):
+        # Balance below the threshold: Apex liquidated it (accounts 17/18, 2026-10-26).
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = self.write(tmp, self.SHORT, [["ACC-1", "23971.34", "23975.43", "25475.43", ""]])
+            with self.assertRaises(mpf.SeedError) as ctx:
+                mpf.build_seed(rows[0], CFG)
+            self.assertIn("liquidated", str(ctx.exception))
+
+    def test_status_is_still_enforced_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.csv"
+            write_statement(path, [["ACC-1", "Inactive", "24964.18", "24248.69", "25748.69", ""]], ",")
+            with self.assertRaises(mpf.SeedError):
+                mpf.build_seed(mpf.read_statement(str(path))[0], CFG)
+
+
 if __name__ == "__main__":
     unittest.main()
