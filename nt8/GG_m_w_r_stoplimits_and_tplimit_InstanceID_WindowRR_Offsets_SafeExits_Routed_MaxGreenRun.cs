@@ -50,7 +50,7 @@ namespace NinjaTrader.NinjaScript.Strategies
     {
         // Bump on every behaviour change; printed at startup and shown as the
         // strategy description, so the Output window shows which build is running.
-        private const string ScriptVersion = "2026.10.22";
+        private const string ScriptVersion = "2026.10.30";
 
         private Order longOrder;
         private Order entryTimeoutOrder;
@@ -785,6 +785,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObserveEntryTrigger(marketDataUpdate.Price);
                 ObserveStopTrigger(marketDataUpdate.Price);
             }
+            PublishRouterHeartbeat();
+        }
+
+        // Also called from the stop-fallback timer, so a seat stays fresh without ticks.
+        // Otherwise every seat goes stale during the daily halt, and the first seat to
+        // claim the session-open signal caches FAIL_CLOSED for the whole book.
+        private void PublishRouterHeartbeat()
+        {
             if (State != State.Realtime || !routerRegistered)
                 return;
 
@@ -1493,6 +1501,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     {
                         CheckStopFallback();
                         CheckEntryTimeout();
+                        PublishRouterHeartbeat();
                     }
                     finally { System.Threading.Interlocked.Exchange(ref stopFallbackTimerQueued, 0); }
                 }, null);

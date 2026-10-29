@@ -136,10 +136,14 @@ or makes persistence unhealthy, the entire book refuses new routed entries.
 Existing broker orders and positions are not automatically cancelled by that
 router refusal.
 
-Market-data events publish a heartbeat at most every five seconds, and bar/order
-events also publish state. Playback must therefore be running and delivering
-market data. A quiet or paused feed can intentionally make the book stale and
-fail closed.
+Each seat publishes a heartbeat at most every five seconds, from market-data
+events and from its 500 ms timer, and bar/order events also publish state. The
+timer keeps seats fresh without ticks, through the daily halt and up to the
+session-open signal. Without it, the first seat to claim that signal saw the
+others stale and cached `FAIL_CLOSED` for the whole book. A seat still goes
+stale when its strategy is disabled or its thread stops responding, and an
+account disconnect still fails the book closed. A quiet or paused feed no longer
+does.
 
 ### Book manifest, decision key and leases
 
