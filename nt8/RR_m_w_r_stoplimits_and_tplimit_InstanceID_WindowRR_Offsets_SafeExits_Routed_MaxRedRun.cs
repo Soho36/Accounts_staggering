@@ -44,7 +44,7 @@ namespace NinjaTrader.NinjaScript.Strategies
     {
         // Bump on every behaviour change; printed at startup and shown as the
         // strategy description, so the Output window shows which build is running.
-        private const string ScriptVersion = "2026.10.30";
+        private const string ScriptVersion = "2026.11.06";
 
         private Order longOrder;
         private Order entryTimeoutOrder;
@@ -132,6 +132,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         // Derived signal names — all unique per instance to prevent cross-instance interference
         private string EntrySignalName    => $"Long1_{InstanceId}";
         private string StopLossSignalName => $"StopLimit_{InstanceId}";
+        private string StopMarketName     => $"StopMarket_{InstanceId}";
+        private string StopRejectExitName => $"StopRejectExit_{InstanceId}";
         private string TakeProfitName     => $"RR_Limit_{InstanceId}";
         private string EmergencyExitName  => $"InvalidStopExit_{InstanceId}";
         private int EntryQuantity         => UseCustomQuantity ? CustomQuantity : DefaultQuantity;
@@ -1060,7 +1062,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 || name.StartsWith("RR_Limit_", StringComparison.Ordinal)
                 || name.StartsWith("DailyFlatten_", StringComparison.Ordinal)
                 || name.StartsWith("InvalidStopExit_", StringComparison.Ordinal)
-                || name.StartsWith("StopTimeoutExit_", StringComparison.Ordinal);
+                || name.StartsWith("StopTimeoutExit_", StringComparison.Ordinal)
+                || name.StartsWith("StopMarket_", StringComparison.Ordinal)
+                || name.StartsWith("StopRejectExit_", StringComparison.Ordinal);
         }
 
         private string BuildRouterConfigKey()
@@ -2504,6 +2508,65 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        // Exchange price limits reject a protective sell stop-limit whose limit price
+        // lies beyond them ("price crossed low limit"), leaving the position with no
+        // stop: observed 2026-11-06 on two live seats. A stop-market has no limit price
+        // and was accepted, so the stop is re-sent as one at the same stop price. If
+        // that is rejected too the position is exited at market, and if the market exit
+        // fails the seat's exits halt with an operator alert. Each rejection is handled
+        // once.
+        private readonly HashSet<Order> handledProtectiveRejections = new HashSet<Order>();
+
+        private void HandleProtectiveRejection(Order order)
+        {
+            if (order == null || IsStopFallbackActive())
+                return;
+            lock (exitOrdersSync)
+            {
+                if (exitsHalted || !handledProtectiveRejections.Add(order))
+                    return;
+            }
+            if (Position.MarketPosition != MarketPosition.Long || Position.Quantity <= 0)
+                return;
+            string accountDetail;
+            if (AccountClosedOutsideStrategy(out accountDetail))
+                return;                          // nothing left to protect
+            int quantity = Position.Quantity;
+            DateTime now = Core.Globals.Now;
+
+            if (order.Name == StopMarketName || order.Name == StopRejectExitName)
+            {
+                if (order.Name == StopRejectExitName)
+                {
+                    HaltExits("the protective stop and the market exit were both rejected; the position "
+                        + "may have no stop");
+                    return;
+                }
+                Print($"[{now}] [{EntrySignalName}] ⚠️ Protective stop-market @ {order.StopPrice} rejected too; "
+                    + "exiting at market");
+            }
+            else if (order.Name == StopLossSignalName && order.StopPrice > 0)
+            {
+                Print($"[{now}] [{EntrySignalName}] ⚠️ Protective stop-limit @ {order.StopPrice} rejected; "
+                    + "re-sending it as a stop-market at the same price");
+                Order replacement = ExitLongStopMarket(0, true, quantity, order.StopPrice,
+                    StopMarketName, EntrySignalName);
+                if (replacement != null)
+                {
+                    TrackOrder(stopOrders, replacement);
+                    return;
+                }
+                Print($"[{now}] [{EntrySignalName}] ⚠️ Stop-market API returned no order; exiting at market");
+            }
+            else
+                return;
+
+            Order exit = ExitLong(0, quantity, StopRejectExitName, EntrySignalName);
+            if (exit == null)
+                HaltExits("the protective stop was rejected and the market exit returned no order; the "
+                    + "position may have no stop");
+        }
+
         protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice,
             int quantity, int filled, double averageFillPrice, OrderState orderState,
             DateTime time, ErrorCode error, string nativeError)
@@ -2529,7 +2592,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 longOrder = order;
                 ApplyEntryOrderStatus(orderState);
             }
-            else if (order.Name == StopLossSignalName)
+            else if (order.Name == StopLossSignalName || order.Name == StopMarketName)
             {
                 TrackOrder(stopOrders, order);
 
@@ -2561,8 +2624,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (error != ErrorCode.NoError || orderState == OrderState.Rejected)
                     Print($"[{time}] [{EntrySignalName}] Stop timeout market order error: {error} {nativeError}");
             }
+            else if (order.Name == StopRejectExitName)
+            {
+                if (orderState == OrderState.Filled)
+                    CancelActiveOrders(takeProfitOrders);
+            }
 
-            if (order.Name == StopLossSignalName || order.Name == TakeProfitName)
+            if (orderState == OrderState.Rejected && (order.Name == StopLossSignalName
+                || order.Name == StopMarketName || order.Name == StopRejectExitName))
+                HandleProtectiveRejection(order);
+
+            if (order.Name == StopLossSignalName || order.Name == StopMarketName
+                || order.Name == StopRejectExitName || order.Name == TakeProfitName)
                 RefreshFlatRouterStatus();
             else if (order.Name != EntrySignalName)
                 PublishStatus();

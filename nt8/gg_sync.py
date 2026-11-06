@@ -89,7 +89,7 @@ OPEN_USE_RE = re.compile(r"\bOpen\s*\[")
 
 # Order-name properties of the routed strategy, each `$"<prefix>{InstanceId}"`.
 ORDER_NAME_PROPERTIES = ("Long1_", "StopLimit_", "RR_Limit_", "InvalidStopExit_",
-                         "StopTimeoutExit_")
+                         "StopTimeoutExit_", "StopMarket_", "StopRejectExit_")
 OWNERSHIP_ANCHOR = '            return name.StartsWith("Long1_", StringComparison.Ordinal)\n'
 OWNERSHIP_STRIP = (
     '            // GG ONLY (gg_sync.py): GG order names carry a GG_ prefix. Strip it so\n'
