@@ -50,7 +50,7 @@ namespace NinjaTrader.NinjaScript.Strategies
     {
         // Bump on every behaviour change; printed at startup and shown as the
         // strategy description, so the Output window shows which build is running.
-        private const string ScriptVersion = "2026.11.06";
+        private const string ScriptVersion = "2026.11.12";
 
         private Order longOrder;
         private Order entryTimeoutOrder;
@@ -1533,8 +1533,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                         && order.StopPrice > 0 && lastPrice <= order.StopPrice)
                     {
                         stopTriggeredAt = Core.Globals.Now;
-                        Print($"[{stopTriggeredAt}] [{EntrySignalName}] Stop price reached at {lastPrice}; "
-                            + "unfilled stop quantity will exit at market after 60 seconds");
+                        Report($"[{stopTriggeredAt}] [{EntrySignalName}] Stop price reached at {lastPrice}; "
+                            + "unfilled stop quantity will exit at market after 60 seconds", LogLevel.Warning);
                         return;
                     }
                 }
@@ -1564,6 +1564,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 stopFallbackExecutions.Clear();
                 stopFallbackFailures = 0;
                 lastFailedStopFallbackOrder = null;
+                accountClosedSeenAt = Core.Globals.MinDate;
             }
         }
 
@@ -1637,12 +1638,49 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if ((now - stopTriggeredAt).TotalSeconds < 60)
                         return;
                     stopFallbackRequested = true;
-                    Print($"[{now}] [{EntrySignalName}] Stop timeout: cancelling entry/stop/target orders "
-                        + "before selling the remaining position at market");
+                    Report($"[{now}] [{EntrySignalName}] Stop timeout: cancelling entry/stop/target orders "
+                        + "before selling the remaining position at market", LogLevel.Warning);
                 }
                 stops = stopOrders.ToArray();
                 targets = takeProfitOrders.ToArray();
                 entry = stopFallbackEntryOrder;
+            }
+
+            // Decide about an outside close BEFORE cancelling anything. On 2026-11-12 this
+            // check ran after the stop was cancelled, misread a long account as flat, and
+            // halted: the long was left with no stop for two hours. Now only a proven,
+            // persistent outside close halts; anything less proceeds to the market exit.
+            if (Position.MarketPosition == MarketPosition.Long)
+            {
+                string accountDetail;
+                bool closedOutside = AccountClosedOutsideStrategy(out accountDetail);
+                lock (exitOrdersSync)
+                {
+                    if (!closedOutside)
+                        accountClosedSeenAt = Core.Globals.MinDate;
+                    else if (accountClosedSeenAt == Core.Globals.MinDate)
+                    {
+                        accountClosedSeenAt = now;
+                        Report($"[{now}] [{EntrySignalName}] Stop timeout: account appears closed outside this "
+                            + $"strategy ({accountDetail}); re-checking for {AccountClosedConfirmSeconds} s "
+                            + "before deciding", LogLevel.Warning);
+                        return;
+                    }
+                    else if ((now - accountClosedSeenAt).TotalSeconds < AccountClosedConfirmSeconds)
+                        return;
+                }
+                if (closedOutside)
+                {
+                    // Proven flat: our resting exits could only open a short now.
+                    CancelForStopFallback(entry);
+                    foreach (Order order in stops)
+                        CancelForStopFallback(order);
+                    foreach (Order order in targets)
+                        CancelForStopFallback(order);
+                    HaltExits("stop-timeout fallback stopped: the position was closed outside this strategy ("
+                        + accountDetail + "); selling now would open a short");
+                    return;
+                }
             }
 
             // Never hold our tracking lock over a managed-order API call; it can
@@ -1684,11 +1722,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     lastFailedStopFallbackOrder = stopFallbackOrder;
                     stopFallbackFailures++;
                 }
-                string accountDetail;
-                if (AccountClosedOutsideStrategy(out accountDetail))
-                    haltReason = "the position was closed outside this strategy (" + accountDetail
-                        + "); selling now would open a short";
-                else if (stopFallbackFailures >= MaxStopFallbackFailures)
+                if (stopFallbackFailures >= MaxStopFallbackFailures)
                     haltReason = stopFallbackFailures + " market exits in a row ended without a fill";
                 remaining = Position.Quantity;
                 if (haltReason == null)
@@ -1713,14 +1747,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (submitted == null)
                         stopFallbackFailures++;
                 }
-                Print($"[{now}] [{EntrySignalName}] Stop timeout market exit quantity={remaining}: "
-                    + (submitted == null ? "API returned no order; will retry" : submitted.OrderState.ToString()));
+                Report($"[{now}] [{EntrySignalName}] Stop timeout market exit quantity={remaining}: "
+                    + (submitted == null ? "API returned no order; will retry" : submitted.OrderState.ToString()),
+                    LogLevel.Warning);
             }
             catch (Exception ex)
             {
                 lock (exitOrdersSync)
                     stopFallbackFailures++;
-                Print($"[{now}] [{EntrySignalName}] Stop timeout market exit failed: {ex.Message}; will retry");
+                Report($"[{now}] [{EntrySignalName}] Stop timeout market exit failed: {ex.Message}; will retry",
+                    LogLevel.Warning);
             }
             finally
             {
@@ -1729,26 +1765,105 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private const int AccountClosedConfirmSeconds = 3;
+        private DateTime accountClosedSeenAt = Core.Globals.MinDate;
+
         // NinjaTrader never credits a broker-side close (an Apex liquidation, a flatten
         // from another platform) to the strategy, so the strategy can still read Long
         // after the account is flat. Any sell sent then would OPEN a short position.
-        // An unreadable account position counts as not proven long.
+        //
+        // True only when the outside close is PROVEN: the account connection is up and
+        // two independent reads (PositionAccount and the account's own position list)
+        // both succeed and both show less than the strategy's long. A missing, failed or
+        // conflicting read is NOT proof. On 2026-11-12 PositionAccount read "Flat 0"
+        // while the account was long 1, and that single read left a long unprotected.
         private bool AccountClosedOutsideStrategy(out string detail)
         {
-            MarketPosition side = MarketPosition.Flat;
-            int quantity = 0;
+            int strategyQuantity = Position.Quantity;
+            if (Position.MarketPosition != MarketPosition.Long)
+            {
+                detail = $"strategy reads {Position.MarketPosition} {strategyQuantity}";
+                return false;
+            }
+
+            MarketPosition propertySide, listSide;
+            int propertyQuantity, listQuantity;
+            string propertyText, listText;
+            bool propertyRead = TryReadPositionAccount(out propertySide, out propertyQuantity, out propertyText);
+            bool listRead = TryReadAccountPositionList(out listSide, out listQuantity, out listText);
+            bool connected = IsAccountConnected();
+            detail = $"strategy reads Long {strategyQuantity}; PositionAccount {propertyText}; "
+                + $"account list {listText}; connected={connected}";
+            if (!propertyRead || !listRead || !connected)
+                return false;
+            return (propertySide != MarketPosition.Long || propertyQuantity < strategyQuantity)
+                && (listSide != MarketPosition.Long || listQuantity < strategyQuantity);
+        }
+
+        private bool TryReadPositionAccount(out MarketPosition side, out int quantity, out string text)
+        {
+            side = MarketPosition.Flat;
+            quantity = 0;
             try
             {
-                if (PositionAccount != null)
+                if (PositionAccount == null)
                 {
-                    side = PositionAccount.MarketPosition;
-                    quantity = PositionAccount.Quantity;
+                    text = "unavailable";
+                    return false;
                 }
+                side = PositionAccount.MarketPosition;
+                quantity = PositionAccount.Quantity;
+                text = $"{side} {quantity}";
+                return true;
             }
+            catch (Exception ex)
+            {
+                text = "unreadable (" + ex.Message + ")";
+                return false;
+            }
+        }
+
+        // The account's position list is what the Positions tab shows. No entry for
+        // this instrument means flat.
+        private bool TryReadAccountPositionList(out MarketPosition side, out int quantity, out string text)
+        {
+            side = MarketPosition.Flat;
+            quantity = 0;
+            try
+            {
+                Account account = Account;
+                if (account == null || account.Positions == null || Instrument == null)
+                {
+                    text = "unavailable";
+                    return false;
+                }
+                string name = Instrument.FullName;
+                lock (account.Positions)
+                    foreach (NinjaTrader.Cbi.Position position in account.Positions)
+                        if (position != null && position.Instrument != null
+                            && position.Instrument.FullName == name)
+                        {
+                            side = position.MarketPosition;
+                            quantity = position.Quantity;
+                            break;
+                        }
+                text = $"{side} {quantity}";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                text = "unreadable (" + ex.Message + ")";
+                return false;
+            }
+        }
+
+        // Output window AND NinjaTrader's log (Log tab and the log files), so exit-safety
+        // events can be reconstructed from the log folder afterwards.
+        private void Report(string message, LogLevel level)
+        {
+            Print(message);
+            try { Log(message, level); }
             catch { }
-            detail = $"strategy reads {Position.MarketPosition} {Position.Quantity}, account reads {side} {quantity}";
-            return Position.MarketPosition == MarketPosition.Long
-                && (side != MarketPosition.Long || quantity < Position.Quantity);
         }
 
         // Stops every further exit order from this seat until NinjaTrader restarts. The
@@ -1761,9 +1876,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     return;
                 exitsHalted = true;
             }
-            Print($"[{Core.Globals.Now}] [{EntrySignalName}] ⛔ EXITS HALTED: {reason}. No further exit orders "
+            // LogLevel.Alert also raises NinjaTrader's alert pop-up.
+            Report($"[{Core.Globals.Now}] [{EntrySignalName}] ⛔ EXITS HALTED: {reason}. No further exit orders "
                 + "will be sent from this seat. Check the account at the broker now, flatten anything still "
-                + "open there, then fully restart NinjaTrader. The seat stays blocked until then.");
+                + "open there, then fully restart NinjaTrader. The seat stays blocked until then.", LogLevel.Alert);
             PublishStatus();
         }
 
@@ -2552,13 +2668,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                         + "may have no stop");
                     return;
                 }
-                Print($"[{now}] [{EntrySignalName}] ⚠️ Protective stop-market @ {order.StopPrice} rejected too; "
-                    + "exiting at market");
+                Report($"[{now}] [{EntrySignalName}] ⚠️ Protective stop-market @ {order.StopPrice} rejected too; "
+                    + "exiting at market", LogLevel.Warning);
             }
             else if (order.Name == StopLossSignalName && order.StopPrice > 0)
             {
-                Print($"[{now}] [{EntrySignalName}] ⚠️ Protective stop-limit @ {order.StopPrice} rejected; "
-                    + "re-sending it as a stop-market at the same price");
+                Report($"[{now}] [{EntrySignalName}] ⚠️ Protective stop-limit @ {order.StopPrice} rejected; "
+                    + "re-sending it as a stop-market at the same price", LogLevel.Warning);
                 Order replacement = ExitLongStopMarket(0, true, quantity, order.StopPrice,
                     StopMarketName, EntrySignalName);
                 if (replacement != null)
@@ -2566,7 +2682,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     TrackOrder(stopOrders, replacement);
                     return;
                 }
-                Print($"[{now}] [{EntrySignalName}] ⚠️ Stop-market API returned no order; exiting at market");
+                Report($"[{now}] [{EntrySignalName}] ⚠️ Stop-market API returned no order; exiting at market",
+                    LogLevel.Warning);
             }
             else
                 return;

@@ -355,6 +355,20 @@ or alter an entry, stop or take-profit order. If account truth is not yet clear,
 the reservation remains and the warning requires broker verification plus a full
 NinjaTrader restart.
 
+### 2026-11-12 — An outside close must be PROVEN before exits halt
+
+**Decision:** The routed "position closed outside the strategy" check needs the
+account connected plus two agreeing reads (`PositionAccount` and
+`Account.Positions`) for 3 s, and it runs before the stop-timeout fallback cancels
+anything. A missing, failed or conflicting read proceeds with the market exit.
+**Reason:** On 2026-11-12 (seat 3, account 15) `PositionAccount` read Flat 0 while
+the account was long; the old check ran after the stop was cancelled, halted, and
+left the long unprotected ~2 h until a manual stop. Exit-safety events now also go
+to NinjaTrader's log (halt = `LogLevel.Alert`), because the Output window alone
+left no trace in the log files.
+**Consequence accepted:** if the account really is flat but one read is broken,
+the fallback sells and can open a short. A naked long was the worse failure.
+
 ---
 
 ## Corrections worth remembering
